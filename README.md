@@ -2,7 +2,7 @@
 
 *Agents that get better every run.* Recursa wraps an existing LLM agent, records and scores its runs, proposes system-prompt changes from its failures, and promotes a change only when it beats the current version on a sealed evaluation set **and** a named human approves it.
 
-This is the v1 described in [the design document](Self-Learning%20Agent%20Framework%20—%20Design%20Document.md): one adapter, one candidate type (system prompt), deterministic primary metric, sealed gate and confirmation sets, authenticated human approval, whole-version promote and rollback.
+This is the v1 described in [the design document](https://github.com/neelkamal0666/Recursa/blob/main/Self-Learning%20Agent%20Framework%20—%20Design%20Document.md): one adapter, one candidate type (system prompt), deterministic primary metric, sealed gate and confirmation sets, authenticated human approval, whole-version promote and rollback.
 
 ## Quickstart
 
@@ -88,7 +88,7 @@ Labelled data is JSONL: `{"id", "input": {...}, "expected": {...}, "group", "tag
 
 ## Reference agent
 
-[examples/triage/](examples/triage/) is a support-ticket triage agent. It returns `{"category", "priority"}` and succeeds when both fields match the label. The design doc left the reference agent as an open decision, so this one is a stand-in:
+[examples/triage/](https://github.com/neelkamal0666/Recursa/tree/main/examples/triage) is a support-ticket triage agent. It returns `{"category", "priority"}` and succeeds when both fields match the label. The design doc left the reference agent as an open decision, so this one is a stand-in:
 
 - `TRIAGE_BACKEND=sim` (default) uses a seeded simulated model. It follows the prompt's guidance and its learned rules, misses cues the prompt doesn't mention, and makes 3% seeded random errors. This lets the whole loop be verified offline at no cost.
 - `TRIAGE_BACKEND=claude` calls `claude-opus-5-5` at low effort, with server-side refusal fallbacks enabled, through the Anthropic SDK.

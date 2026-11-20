@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,21 @@ version = "0.1.0"
 description = "Agents that get better every run: eval-gated, human-approved self-improvement for LLM agents."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Neel Kamal" }]
+keywords = ["llm", "agents", "evaluation", "prompt-optimization", "human-in-the-loop", "self-improving"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
     "cryptography>=42",
     "pyyaml>=6",
@@ -17,6 +31,11 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.70"]
 dev = ["pytest>=8", "anthropic>=0.70"]
+
+[project.urls]
+Homepage = "https://github.com/neelkamal0666/Recursa"
+Repository = "https://github.com/neelkamal0666/Recursa"
+Issues = "https://github.com/neelkamal0666/Recursa/issues"
 
 [project.scripts]
 recursa = "recursa.cli:main"

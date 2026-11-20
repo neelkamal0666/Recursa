@@ -1,0 +1,7 @@
+reviewers:
+  - id: alice
+    name: Alice (support lead)
+    surfaces: [system_prompt]
+quorum:
+  system_prompt: 1
+  default: 1

@@ -1,0 +1,24 @@
+project: support-triage
+factory: triage_agent:build    # module:function returning recursa.Project
+home: .recursa
+reviewers: reviewers.yaml
+expire_after_days: 7
+dev_samples: 1
+gate:
+  min_gain: 0.02               # +2 points absolute on task success
+  alpha: 0.05
+  budget: 20                   # candidate evaluations per gate-set version
+  min_examples: 150
+  confirm_min_examples: 100
+  samples: 3
+  bootstrap: 10000
+  max_cost_increase: 0.10
+  max_latency_increase: 0.15
+  max_safety_regressions: 0
+optimizer:
+  strategy: heuristic          # or: claude
+  candidates: 4
+  gate_top_k: 1
+  model: claude-opus-5-5
+budget:
+  max_cost_usd_per_cycle: 5.0

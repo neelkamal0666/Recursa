@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recursa"
+version = "0.1.0"
+description = "Agents that get better every run: eval-gated, human-approved self-improvement for LLM agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "cryptography>=42",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.70"]
+dev = ["pytest>=8", "anthropic>=0.70"]
+
+[project.scripts]
+recursa = "recursa.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["recursa*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -176,7 +176,9 @@ def recursa_server(pg_database):
         db_url = pg_database()
         app = build(db_url, db_url)
         port = _free_port()
-        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+        # A short keep-alive makes clients meet server-closed idle connections, as in CI.
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
+                                               timeout_keep_alive=1))
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         deadline = time.time() + 10

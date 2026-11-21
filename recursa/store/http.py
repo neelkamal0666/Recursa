@@ -31,6 +31,12 @@ class ServerError(RuntimeError):
     pass
 
 
+# Servers close idle keep-alive connections (uvicorn after 5 s). Reopen before that, and
+# treat a dead reused connection as "not sent": retry once on a fresh one.
+_MAX_IDLE_S = 2.0
+_STALE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, http.client.RemoteDisconnected)
+
+
 class _Client:
     """Keep-alive HTTP/1.1 client: one persistent connection per thread, reopened on error."""
 
@@ -45,13 +51,18 @@ class _Client:
         self.key, self.timeout, self.retries = key, timeout, retries
         self._local = threading.local()
 
-    def _conn(self) -> http.client.HTTPConnection:
+    def _conn(self) -> tuple[http.client.HTTPConnection, bool]:
+        """(connection, reused). Connections idle for too long are replaced, not reused."""
         conn = getattr(self._local, "conn", None)
+        if conn is not None and time.monotonic() - getattr(self._local, "used", 0.0) > _MAX_IDLE_S:
+            self._drop()
+            conn = None
         if conn is None:
             cls = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
             conn = cls(self.host, self.port, timeout=self.timeout)
             self._local.conn = conn
-        return conn
+            return conn, False
+        return conn, True
 
     def _drop(self) -> None:
         conn = getattr(self._local, "conn", None)
@@ -73,18 +84,25 @@ class _Client:
         if data is not None:
             headers["Content-Type"] = "application/json"
         attempts = self.retries + 1 if (idempotent or method == "GET") else 1
-        for attempt in range(attempts):
+        attempt, stale_retry_used = 0, False
+        while True:
+            reused = False
             try:
-                conn = self._conn()
+                conn, reused = self._conn()
                 conn.request(method, target, body=data, headers=headers)
                 resp = conn.getresponse()
                 raw = resp.read()
                 status = resp.status
+                self._local.used = time.monotonic()
             except (OSError, http.client.HTTPException) as e:
                 self._drop()
-                if attempt == attempts - 1:
+                if reused and isinstance(e, _STALE) and not stale_retry_used:
+                    stale_retry_used = True  # the server had closed the idle connection: not processed
+                    continue
+                attempt += 1
+                if attempt >= attempts:
                     raise ServerError(f"cannot reach Recursa Server at {self.base}: {e}") from None
-                time.sleep(min(0.2 * 2 ** attempt, 5.0))
+                time.sleep(min(0.2 * 2 ** (attempt - 1), 5.0))
                 continue
             if status < 300:
                 return json.loads(raw) if raw else None
@@ -93,10 +111,10 @@ class _Client:
                 raise PermissionError(f"Recursa Server refused {method} {path}: {detail}")
             if status == 404:
                 raise KeyError(detail)
-            if status < 500 or attempt == attempts - 1:
+            attempt += 1
+            if status < 500 or attempt >= attempts:
                 raise ServerError(f"{method} {path} failed with HTTP {status}: {detail}")
-            time.sleep(min(0.2 * 2 ** attempt, 5.0))
-        raise AssertionError("unreachable")
+            time.sleep(min(0.2 * 2 ** (attempt - 1), 5.0))
 
 
 def _detail(raw: bytes) -> str:

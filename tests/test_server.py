@@ -180,6 +180,27 @@ def test_database_roles_enforce_append_only_and_the_sealed_boundary(pg_database,
                 c.execute(f"DROP ROLE {role}")
 
 
+# -- connection handling -------------------------------------------------------------------------------
+def test_client_survives_server_closing_idle_connections(server, monkeypatch):
+    import time
+
+    import recursa.store.http as http_store
+    from recursa.store.http import HttpRecordStore
+
+    base, mint, _ = server
+    records = HttpRecordStore(base, mint("reviewer", "admin"))
+    records.audit("t", "first", "s")
+    monkeypatch.setattr(http_store, "_MAX_IDLE_S", 60.0)  # reuse the connection after the server closed it
+    time.sleep(1.5)  # server keep-alive is 1 s in tests
+    records.audit("t", "second", "s")  # not retryable in general, but a dead idle connection never sent it
+    monkeypatch.setattr(http_store, "_MAX_IDLE_S", 0.5)  # and normally idle connections are replaced first
+    time.sleep(1.5)
+    records.audit("t", "third", "s")
+    assert [e["action"] for e in records.audit_log()] == ["first", "second", "third"]
+    assert records.verify_audit_chain()
+    records.close()
+
+
 # -- write-ahead log shipping --------------------------------------------------------------------------
 def test_runs_survive_a_server_outage_and_ship_exactly_once(server_learner):
     import asyncio

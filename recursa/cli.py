@@ -120,11 +120,11 @@ def cmd_data(args: argparse.Namespace) -> None:
         print(f"retired the previous {args.kind} set into dev (dev {new_dev}); sealed {version}")
         _maybe_remove(args.file, args.keep_source)
     elif args.data_cmd == "status":
-        from .store import Store
+        from .store import open_sealed_store
 
         sealed = SealedSets(paths)
         m = sealed.manifest()
-        ss = Store(paths.sealed_db)
+        ss = open_sealed_store(cfg)
         for entry in m.get("gate", []):
             entry["evaluations_used"] = ss.ledger_count(entry["version"], "gate")
             entry["budget"] = cfg.gate.budget

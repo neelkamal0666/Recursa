@@ -1,6 +1,7 @@
-"""SQLite store. Runs, scores, feedback, versions, approvals and the audit log are
-append-only: triggers abort any UPDATE or DELETE on them. The schema lives in
-versioned migrations (recursa/migrations/sqlite); see recursa.migrations."""
+"""LocalStore: the embedded SQLite backend, implementing both RecordStore and
+SealedStore (see base.py for the semantics). Append-only tables are also guarded by
+triggers that abort any UPDATE or DELETE. The schema lives in versioned migrations
+(recursa/migrations/sqlite); see recursa.migrations."""
 from __future__ import annotations
 
 import json
@@ -8,14 +9,14 @@ import os
 import sqlite3
 import threading
 from dataclasses import asdict
-from typing import Any, Iterator
+from typing import Any
 
-from . import migrations
-from .redact import RedactionError, Redactor
-from .types import Candidate, Run, Score, Step, canonical_json, content_hash, new_id, now
+from .. import migrations
+from ..redact import RedactionError, Redactor
+from ..types import Candidate, Run, Score, canonical_json, content_hash, new_id, now
 
 
-class Store:
+class LocalStore:
     def __init__(self, path: str, redactor: Redactor | None = None, auto_migrate: bool = True):
         self.path = path
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -56,7 +57,7 @@ class Store:
             steps = [{k: v for k, v in asdict(s).items() if k not in ("input", "output")} for s in run.steps]
             err, redaction = "redaction failed; payload dropped", "unredacted_dropped"
         self._x(
-            "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run.id, run.agent, run.agent_version, run.mode, run.example_id, run.sample, run.status,
              json.dumps(inp, default=str), json.dumps(out, default=str), json.dumps(steps, default=str),
              run.cost_usd, run.latency_ms, run.started_at, json.dumps(ctx, default=str), err, redaction,
@@ -71,10 +72,21 @@ class Store:
             r[k[:-5]] = json.loads(r.pop(k)) if r[k] is not None else None
         return r
 
-    def list_runs(self, mode: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-        sql = "SELECT id FROM runs" + (" WHERE mode=?" if mode else "") + " ORDER BY started_at DESC LIMIT ?"
-        args = (mode, limit) if mode else (limit,)
-        return [self.get_run(r["id"]) for r in self._q(sql, args)]
+    def list_runs(self, mode: str | None = None, limit: int = 100,
+                  before: str | None = None) -> list[dict[str, Any]]:
+        where, args = [], []
+        if mode:
+            where.append("mode=?")
+            args.append(mode)
+        if before:
+            cur = self._q("SELECT started_at FROM runs WHERE id=?", (before,))
+            if not cur:
+                return []
+            where.append("(started_at < ? OR (started_at = ? AND id < ?))")
+            args += [cur[0]["started_at"], cur[0]["started_at"], before]
+        sql = ("SELECT id FROM runs" + (" WHERE " + " AND ".join(where) if where else "")
+               + " ORDER BY started_at DESC, id DESC LIMIT ?")
+        return [self.get_run(r["id"]) for r in self._q(sql, (*args, limit))]
 
     # -- bulk transfer between stores (optimizer worker -> main store) -------------------------
     TRANSFER_TABLES = ("runs", "scores", "eval_cache")
@@ -170,7 +182,7 @@ class Store:
 
     # -- candidates ----------------------------------------------------------------
     def put_candidate(self, c: Candidate) -> None:
-        self._x("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        self._x("INSERT OR IGNORE INTO candidates VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (c.id, c.surface, c.baseline_version, canonical_json(c.proposed), json.dumps(c.insight_ids),
                  c.status, c.created_at, c.source, c.parent_candidate, json.dumps(c.dev_report), c.rationale))
 
@@ -188,9 +200,21 @@ class Store:
                          parent_candidate=r["parent_candidate"], dev_report=json.loads(r["dev_report_json"]),
                          rationale=r["rationale"])
 
-    def list_candidates(self, status: str | None = None) -> list[Candidate]:
-        sql = "SELECT id FROM candidates" + (" WHERE status=?" if status else "") + " ORDER BY created_at"
-        return [self.get_candidate(r["id"]) for r in self._q(sql, (status,) if status else ())]
+    def list_candidates(self, status: str | None = None, limit: int | None = None,
+                        after: str | None = None) -> list[Candidate]:
+        where, args = [], []
+        if status:
+            where.append("status=?")
+            args.append(status)
+        if after:
+            cur = self._q("SELECT created_at FROM candidates WHERE id=?", (after,))
+            if not cur:
+                return []
+            where.append("(created_at > ? OR (created_at = ? AND id > ?))")
+            args += [cur[0]["created_at"], cur[0]["created_at"], after]
+        sql = ("SELECT id FROM candidates" + (" WHERE " + " AND ".join(where) if where else "")
+               + " ORDER BY created_at, id" + (" LIMIT ?" if limit is not None else ""))
+        return [self.get_candidate(r["id"]) for r in self._q(sql, (*args, limit) if limit is not None else tuple(args))]
 
     def put_insight(self, cycle_id: str, insight: dict[str, Any]) -> None:
         self._x("INSERT OR IGNORE INTO insights VALUES (?,?,?,?)",
@@ -228,8 +252,9 @@ class Store:
                     "VALUES (?,?,?,?,?,?,?)",
                     (at, actor, action, subject, canonical_json(details or {}), prev_hash, content_hash(body)))
 
-    def audit_log(self) -> list[dict[str, Any]]:
-        rows = [dict(r) for r in self._q("SELECT * FROM audit ORDER BY seq")]
+    def audit_log(self, after: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM audit WHERE seq > ? ORDER BY seq" + (" LIMIT ?" if limit is not None else "")
+        rows = [dict(r) for r in self._q(sql, (after, limit) if limit is not None else (after,))]
         for r in rows:
             r["details"] = json.loads(r.pop("details_json"))
         return rows
@@ -254,8 +279,11 @@ class Store:
         return json.loads(rows[0]["state_json"]) if rows else None
 
     # -- sealed-side tables ---------------------------------------------------------------
-    def ledger_add(self, gate_version: str, candidate_id: str, kind: str) -> None:
-        self._x("INSERT INTO gate_ledger VALUES (?,?,?,?)", (gate_version, candidate_id, kind, now()))
+    def ledger_add(self, gate_version: str, candidate_id: str, kind: str) -> bool:
+        with self._lock:
+            cur = self.db.execute("INSERT OR IGNORE INTO gate_ledger VALUES (?,?,?,?)",
+                                  (gate_version, candidate_id, kind, now()))
+            return cur.rowcount == 1
 
     def ledger_count(self, gate_version: str, kind: str) -> int:
         return self._q("SELECT COUNT(*) AS n FROM gate_ledger WHERE gate_version=? AND kind=?",
@@ -271,15 +299,7 @@ class Store:
         return h
 
     def latest_packet(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None:
-        rows = self._q("SELECT hash, json FROM packets WHERE candidate_id=? ORDER BY created_at DESC LIMIT 1",
+        rows = self._q("SELECT hash, json FROM packets WHERE candidate_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
                        (candidate_id,))
         return (rows[0]["hash"], json.loads(rows[0]["json"])) if rows else None
 
-
-def steps_from_dicts(steps: list[dict[str, Any]]) -> list[Step]:
-    return [Step(**s) for s in steps]
-
-
-def iter_rows(store: Store, sql: str, args: tuple = ()) -> Iterator[dict[str, Any]]:
-    for r in store._q(sql, args):
-        yield dict(r)

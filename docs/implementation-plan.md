@@ -23,8 +23,8 @@ Known gaps carried into this plan:
 
 | Phase | Name | Depends on | Rough size | Release |
 | --- | --- | --- | --- | --- |
-| 0 | Stabilise and release 0.1.1 | none | 1 week | 0.1.1 |
-| 1 | Store interface | 0 | 1.5 weeks | 0.2.0 |
+| 0 | Stabilise and release 0.1.1 (done except live run and release) | none | 1 week | 0.1.1 |
+| 1 | Store interface (done, unreleased) | 0 | 1.5 weeks | 0.2.0 |
 | 2 | Recursa Server core | 1 | 4 weeks | 0.3.0 |
 | 3 | Server-side governance and gate worker | 2 | 3 weeks | 0.4.0 |
 | 4 | Admin console: reviews and operations | 3 | 4 weeks | 0.5.0 |
@@ -72,7 +72,7 @@ Cross-cutting rules for every phase:
 
 - 0.1.1 installable from PyPI; `recursa db status` works on a fresh install and on a 0.1.0 database.
 - A real Claude run produces measured telemetry that matches the Console usage figures within rounding.
-- No module outside `recursa/store.py` and `recursa/migrations/` touches SQL.
+- No module outside `recursa/store/` and `recursa/migrations/` touches SQL.
 
 **Risks:** pricing table drift (`recursa/llm.py` `PRICES`). Mitigation: unpriced models already mark runs as self-reported; add a test that every model id used in examples is priced.
 
@@ -85,12 +85,12 @@ Cross-cutting rules for every phase:
 **Work**
 
 1. **Define `recursa/store/` package:**
-   - `base.py`: a `Store` `Protocol` with the 33 public methods the current store exposes, grouped as runs and scores, eval cache, feedback, versions and deployments, candidates, insights, approvals, audit, cycles, gate ledger, packets. Typed with the existing dataclasses from `recursa/types.py`.
+   - `base.py`: a `RecordStore` `Protocol` with the 33 public methods the current store exposes, grouped as runs and scores, eval cache, feedback, versions and deployments, candidates, insights, approvals, audit, cycles, gate ledger, packets. Typed with the existing dataclasses from `recursa/types.py`.
    - `local.py`: today's SQLite code, renamed `LocalStore`.
    - `__init__.py`: `open_store(config)` factory: no `store.url` gives `LocalStore`; `store.url` gives `HttpStore` (phase 2).
    - Keep `from recursa.store import Store` working for existing users.
 2. **Split the sealed side.** Today the sealed database is a second `Store`. Introduce a narrower `SealedStore` protocol (gate ledger, sealed examples, gate results) so phase 3 can give it its own credentials.
-3. **Contract test suite.** `tests/store_contract.py`: one parametrised suite every backend must pass, covering append-only behaviour, idempotent feedback, audit-chain verification, version sequencing, ledger counting and redaction failing closed. Run it against `LocalStore` now.
+3. **Contract test suite.** `tests/test_store_contract.py`: one parametrised suite every backend must pass, covering append-only behaviour, idempotent feedback, audit-chain verification, version sequencing, ledger counting and redaction failing closed. Run it against `LocalStore` now.
 4. **Config:** `store:` section accepts `auto_migrate`, and reserves `url` and `key_env` (rejected with a clear message until phase 2).
 
 **Tests:** contract suite; all existing tests unchanged.

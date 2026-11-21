@@ -27,6 +27,7 @@ from .auth import Auth, AuthError, Reviewers
 from .data import OpenSplits, Paths, SealedSets
 from .evals import EvalResult, run_eval
 from .project import Config, Project, load_project
+from .redact import Redactor
 from .stats import compare
 from .types import Candidate, Run, Step, content_hash, new_id, now
 
@@ -74,7 +75,7 @@ def _case(eid: str, delta: float, example, base, cand) -> dict[str, Any]:
 
 class Learner:
     def __init__(self, config: Config, project: Project | None = None):
-        from .store import Store  # local import keeps worker imports light
+        from .store import open_store  # local import keeps worker imports light
 
         self.cfg = config
         self.paths = Paths(config.home_path)
@@ -82,7 +83,8 @@ class Learner:
         self.project = project or load_project(config.factory, config.root)
         self.agent = self.project.agent
         self.suite = self.project.suite
-        self.store = Store(self.paths.db, auto_migrate=bool(config.store.get("auto_migrate", True)))
+        self.redactor = Redactor()
+        self.store = open_store(config, redactor=self.redactor)
         self._sealed_store = None
         self.open_splits = OpenSplits(self.paths)
         self._wal_lock = threading.Lock()
@@ -92,11 +94,10 @@ class Learner:
     # -- sealed side (gate process only) ---------------------------------------------------
     @property
     def sealed_store(self):
-        from .store import Store
+        from .store import open_sealed_store
 
         if self._sealed_store is None:
-            self._sealed_store = Store(self.paths.sealed_db,
-                                        auto_migrate=bool(self.cfg.store.get("auto_migrate", True)))
+            self._sealed_store = open_sealed_store(self.cfg)
         return self._sealed_store
 
     @property
@@ -297,9 +298,9 @@ class Learner:
         return result
 
     def _ingest_worker_runs(self, worker_db: str) -> float:
-        from .store import Store
+        from .store import open_scratch_store
 
-        src = Store(worker_db)
+        src = open_scratch_store(worker_db)
         try:
             cost = self.store.import_records(src.export_records())
         finally:
@@ -345,7 +346,8 @@ class Learner:
         used = self.sealed_store.ledger_count(gate_version, "gate")
         if used >= gcfg.budget:
             raise GateBudgetExhausted(f"gate set {gate_version} has spent its {gcfg.budget} evaluations")
-        self.sealed_store.ledger_add(gate_version, c.id, "gate")  # spend budget before looking
+        if not self.sealed_store.ledger_add(gate_version, c.id, "gate"):  # spend budget before looking
+            raise RuntimeError("each candidate is evaluated on a gate-set version at most once")
 
         base_vid = c.baseline_version
         base_cfg = self.version_config(base_vid)
@@ -388,7 +390,8 @@ class Learner:
     def _confirm(self, c: Candidate, gate_report: dict[str, Any], gate_base: EvalResult, gate_cand: EvalResult,
                  confirm_version: str, actor: str) -> dict[str, Any]:
         gcfg = self.cfg.gate
-        self.sealed_store.ledger_add(confirm_version, c.id, "confirm")
+        if not self.sealed_store.ledger_add(confirm_version, c.id, "confirm"):
+            raise RuntimeError("each candidate uses a confirmation-set version at most once")
         base_cfg = self.version_config(c.baseline_version)
         cb = self._sealed_eval(c.baseline_version, base_cfg, confirm_version)
         ck = self._sealed_eval(f"{c.baseline_version}+{c.id}", {**base_cfg, "surfaces": c.proposed}, confirm_version)
@@ -440,7 +443,7 @@ class Learner:
             "live_tool_dependencies": [t["name"] for t in base_cfg.get("tools", [])
                                        if t["capability"] == "read_only"],
         }
-        return self.sealed_store.put_packet(c.id, self.store.redactor(packet))
+        return self.sealed_store.put_packet(c.id, self.redactor(packet))
 
     def packet(self, candidate_id: str) -> tuple[str, dict[str, Any]]:
         p = self.sealed_store.latest_packet(candidate_id)

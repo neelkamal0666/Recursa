@@ -18,11 +18,11 @@ def _run(job: dict[str, Any]) -> dict[str, Any]:
     from .evals import run_eval
     from .project import load_project
     from .reflect import BatchErrorAnalysis, insight_to_dict
-    from .store import Store
+    from .store import open_scratch_store
     from .types import Example
 
     project = load_project(job["factory"], job["root"])
-    store = Store(job["worker_db"])
+    store = open_scratch_store(job["worker_db"])
     train = [Example.from_dict(d) for d in job["train"]]
     dev = [Example.from_dict(d) for d in job["dev"]]
     base = job["baseline"]

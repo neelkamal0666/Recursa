@@ -383,8 +383,9 @@ def test_store_transfer_is_idempotent_and_charges_only_new_runs(tmp_path):
     assert dst.get_run(b.id)["id"] == b.id
 
 
-def test_no_sql_outside_the_store():
-    """Phase 1 swaps the store for other backends; nothing else may depend on SQLite."""
+def test_no_sql_or_backend_classes_outside_the_store():
+    """Backends are swappable: only recursa/store/ (and migrations) may touch SQLite or
+    construct a backend; everything else uses the protocols and the open_* factories."""
     import re
     from pathlib import Path
 
@@ -392,8 +393,22 @@ def test_no_sql_outside_the_store():
     offenders = []
     for path in pkg.rglob("*.py"):
         rel = path.relative_to(pkg).as_posix()
-        if rel == "store.py" or rel.startswith("migrations/") or rel == "isolation.py":
+        if rel.startswith(("store/", "migrations/")) or rel == "isolation.py":
             continue
-        if re.search(r"import sqlite3|\._q\(|\._x\(|\.db\.execute", path.read_text()):
+        text = path.read_text()
+        if re.search(r"import sqlite3|\._q\(|\._x\(|\.db\.execute|\b(Local)?Store\(|import (Local)?Store\b", text):
             offenders.append(rel)
     assert offenders == []
+
+
+def test_store_config_rejects_server_settings_until_supported(tmp_path):
+    from recursa.project import load_config
+
+    base = "project: p\nfactory: m:f\n"
+    for extra, msg in (("store:\n  url: https://x\n", "Recursa Server"), ("store:\n  colour: red\n", "colour")):
+        p = tmp_path / "recursa.yaml"
+        p.write_text(base + extra)
+        with pytest.raises(ValueError, match=msg):
+            load_config(str(p))
+    p.write_text(base + "store:\n  auto_migrate: false\n")
+    assert load_config(str(p)).store == {"auto_migrate": False}

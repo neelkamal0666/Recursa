@@ -14,7 +14,7 @@ from typing import Any
 
 from .adapter import Agent
 from .redact import DEFAULT_PATTERNS
-from .store import Store
+from .store import RecordStore
 from .types import Example, Run, Score, content_hash
 
 
@@ -211,7 +211,7 @@ def _cache_key(config_hash: str, ex: Example, sample: int, suite_version: str) -
 
 
 async def run_eval(agent: Agent, version: str, config: dict[str, Any], examples: list[Example], suite: EvalSuite,
-                   store: Store, dataset_version: str, samples: int = 3, concurrency: int = 16,
+                   store: RecordStore, dataset_version: str, samples: int = 3, concurrency: int = 16,
                    use_cache: bool = True) -> EvalResult:
     """Replay examples against one agent configuration, ``samples`` times each.
 

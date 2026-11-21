@@ -47,6 +47,19 @@ class Config:
         return os.path.join(self.root, self.reviewers)
 
 
+STORE_KEYS = {"auto_migrate"}
+
+
+def _check_store(store: dict[str, Any]) -> dict[str, Any]:
+    if "url" in store or "key_env" in store:
+        raise ValueError("store.url / store.key_env select Recursa Server, which is not available yet (planned for "
+                         "0.3); remove them to use the local store")
+    unknown = set(store) - STORE_KEYS
+    if unknown:
+        raise ValueError(f"unknown store setting(s): {', '.join(sorted(unknown))}")
+    return store
+
+
 def load_config(path: str = "recursa.yaml") -> Config:
     path = os.path.abspath(path)
     with open(path) as f:
@@ -57,7 +70,7 @@ def load_config(path: str = "recursa.yaml") -> Config:
     budget = Config.__dataclass_fields__["budget"].default_factory()
     budget.update(raw.get("budget", {}))
     store = Config.__dataclass_fields__["store"].default_factory()
-    store.update(raw.get("store", {}))
+    store.update(_check_store(raw.get("store") or {}))
     return Config(
         root=root, project=raw["project"], factory=raw["factory"], home=raw.get("home", ".recursa"),
         gate=GateConfig.from_dict(raw.get("gate", {})), optimizer=opt, reflect=raw.get("reflect", {}),

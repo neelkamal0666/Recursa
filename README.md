@@ -127,7 +127,9 @@ Other adapters (LangGraph, Agent SDK, MCP), Postgres, OTel export, calibrated ju
 recursa/
   adapter.py   wrap(), Agent, Context: the v1 adapter contract
   trace.py     rc.trace.model(), @rc.tool(capability, mock): instrumentation + sandbox
-  store.py     SQLite store: append-only tables, hash-chained audit log
+  store/       storage interface (RecordStore, SealedStore), open_* factories, LocalStore (SQLite)
+  migrations/  numbered, forward-only schema migrations per backend
+  clients.py   measured Anthropic clients (rc.clients)
   data.py      splits, sealing (AES-GCM), rotation
   evals.py     evaluators, suites, cached eval runner
   stats.py     paired cluster bootstrap, Holm, gate decision

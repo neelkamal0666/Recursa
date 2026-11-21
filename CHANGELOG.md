@@ -2,6 +2,20 @@
 
 All notable changes to Recursa. Versions follow semantic versioning; before 1.0, minor versions may break compatibility and say how to upgrade.
 
+## Unreleased (0.2.0)
+
+### Added
+
+- Storage interface: `RecordStore` and `SealedStore` protocols in `recursa/store/base.py`, with `open_store`, `open_sealed_store` and `open_scratch_store` factories. The learner, worker, evals and CLI use only these, so other backends (Recursa Server) can be added without touching them.
+- Contract test suite (`tests/test_store_contract.py`) that every backend must pass.
+- Pagination: `list_runs(before=...)`, `list_candidates(limit=..., after=...)`, `audit_log(after=..., limit=...)`.
+
+### Changed
+
+- The SQLite store is now `recursa.store.LocalStore`. `recursa.store.Store` remains as an alias.
+- Writes are idempotent (first write wins): putting a run or candidate whose id exists is a no-op instead of an error, so clients can retry safely. `ledger_add` returns whether it charged the gate budget instead of raising on a repeat.
+- `store.url` and `store.key_env` are rejected with a clear message until Recursa Server exists; unknown `store` settings are errors.
+
 ## 0.1.1 — 2026-11-21
 
 ### Added

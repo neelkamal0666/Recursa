@@ -36,6 +36,7 @@ class Config:
     expire_after_days: float = 7.0
     budget: dict[str, Any] = field(default_factory=lambda: {"max_cost_usd_per_cycle": 5.0})
     dev_samples: int = 1
+    store: dict[str, Any] = field(default_factory=lambda: {"auto_migrate": True})
 
     @property
     def home_path(self) -> str:
@@ -55,12 +56,14 @@ def load_config(path: str = "recursa.yaml") -> Config:
     opt.update(raw.get("optimizer", {}))
     budget = Config.__dataclass_fields__["budget"].default_factory()
     budget.update(raw.get("budget", {}))
+    store = Config.__dataclass_fields__["store"].default_factory()
+    store.update(raw.get("store", {}))
     return Config(
         root=root, project=raw["project"], factory=raw["factory"], home=raw.get("home", ".recursa"),
         gate=GateConfig.from_dict(raw.get("gate", {})), optimizer=opt, reflect=raw.get("reflect", {}),
         reviewers=raw.get("reviewers", "reviewers.yaml"),
         expire_after_days=float(raw.get("expire_after_days", 7)), budget=budget,
-        dev_samples=int(raw.get("dev_samples", 1)),
+        dev_samples=int(raw.get("dev_samples", 1)), store=store,
     )
 
 

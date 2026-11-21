@@ -83,7 +83,7 @@ class Learner:
         self.project = project or load_project(config.factory, config.root)
         self.agent = self.project.agent
         self.suite = self.project.suite
-        self.store = Store(self.paths.db)
+        self.store = Store(self.paths.db, auto_migrate=bool(config.store.get("auto_migrate", True)))
         self._sealed_store = None
         self.open_splits = OpenSplits(self.paths)
         self._wal_lock = threading.Lock()
@@ -96,7 +96,8 @@ class Learner:
         from .store import Store
 
         if self._sealed_store is None:
-            self._sealed_store = Store(self.paths.sealed_db)
+            self._sealed_store = Store(self.paths.sealed_db,
+                                        auto_migrate=bool(self.cfg.store.get("auto_migrate", True)))
         return self._sealed_store
 
     @property

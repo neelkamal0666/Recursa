@@ -1,5 +1,6 @@
 """SQLite store. Runs, scores, feedback, versions, approvals and the audit log are
-append-only: triggers abort any UPDATE or DELETE on them."""
+append-only: triggers abort any UPDATE or DELETE on them. The schema lives in
+versioned migrations (recursa/migrations/sqlite); see recursa.migrations."""
 from __future__ import annotations
 
 import json
@@ -9,48 +10,13 @@ import threading
 from dataclasses import asdict
 from typing import Any, Iterator
 
+from . import migrations
 from .redact import RedactionError, Redactor
 from .types import Candidate, Run, Score, Step, canonical_json, content_hash, new_id, now
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS runs (
-  id TEXT PRIMARY KEY, agent TEXT, agent_version TEXT, mode TEXT, example_id TEXT, sample INTEGER,
-  status TEXT, input_json TEXT, output_json TEXT, steps_json TEXT, cost_usd REAL, latency_ms REAL,
-  started_at REAL, context_json TEXT, error TEXT, redaction TEXT, telemetry TEXT);
-CREATE TABLE IF NOT EXISTS scores (
-  run_id TEXT, evaluator TEXT, evaluator_version TEXT, value REAL, rationale TEXT, tier TEXT,
-  PRIMARY KEY (run_id, evaluator, evaluator_version));
-CREATE TABLE IF NOT EXISTS feedback (
-  id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, value REAL, correction TEXT, author TEXT,
-  idempotency_key TEXT UNIQUE, created_at REAL);
-CREATE TABLE IF NOT EXISTS eval_cache (key TEXT PRIMARY KEY, run_id TEXT);
-CREATE TABLE IF NOT EXISTS versions (
-  id TEXT PRIMARY KEY, seq INTEGER UNIQUE, parent TEXT, config_json TEXT, config_hash TEXT,
-  candidate_id TEXT, approvers_json TEXT, created_at REAL);
-CREATE TABLE IF NOT EXISTS deployments (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, version_id TEXT, action TEXT, actor TEXT, reason TEXT, at REAL);
-CREATE TABLE IF NOT EXISTS candidates (
-  id TEXT PRIMARY KEY, surface TEXT, baseline_version TEXT, proposed_json TEXT, insight_ids_json TEXT,
-  status TEXT, created_at REAL, source TEXT, parent_candidate TEXT, dev_report_json TEXT, rationale TEXT);
-CREATE TABLE IF NOT EXISTS insights (id TEXT PRIMARY KEY, cycle_id TEXT, json TEXT, created_at REAL);
-CREATE TABLE IF NOT EXISTS approvals (
-  id TEXT PRIMARY KEY, candidate_id TEXT, reviewer TEXT, decision TEXT, reason TEXT, channel TEXT,
-  packet_hash TEXT, at REAL);
-CREATE TABLE IF NOT EXISTS audit (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, at REAL, actor TEXT, action TEXT, subject TEXT, details_json TEXT,
-  prev_hash TEXT, hash TEXT);
-CREATE TABLE IF NOT EXISTS cycles (id TEXT PRIMARY KEY, state_json TEXT, updated_at REAL);
-CREATE TABLE IF NOT EXISTS gate_ledger (gate_version TEXT, candidate_id TEXT, kind TEXT, at REAL,
-  PRIMARY KEY (gate_version, candidate_id, kind));
-CREATE TABLE IF NOT EXISTS packets (candidate_id TEXT, hash TEXT PRIMARY KEY, json TEXT, created_at REAL);
-"""
-
-IMMUTABLE = ["runs", "scores", "feedback", "eval_cache", "versions", "deployments", "approvals", "audit",
-             "gate_ledger", "packets", "insights"]
-
 
 class Store:
-    def __init__(self, path: str, redactor: Redactor | None = None):
+    def __init__(self, path: str, redactor: Redactor | None = None, auto_migrate: bool = True):
         self.path = path
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self.redactor = redactor or Redactor()
@@ -58,15 +24,9 @@ class Store:
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
-        self.db.executescript(SCHEMA)
-        cols = {r[1] for r in self.db.execute("PRAGMA table_info(runs)")}
-        if "telemetry" not in cols:  # databases created before telemetry was recorded
-            self.db.execute("ALTER TABLE runs ADD COLUMN telemetry TEXT")
-        for t in IMMUTABLE:
-            for op in ("UPDATE", "DELETE"):
-                self.db.execute(
-                    f"CREATE TRIGGER IF NOT EXISTS {t}_no_{op.lower()} BEFORE {op} ON {t} "
-                    f"BEGIN SELECT RAISE(ABORT, '{t} is append-only'); END")
+        # A local SQLite store is zero-setup, so it migrates itself by default. With
+        # auto_migrate=False it refuses to open an out-of-date database instead.
+        self.applied_migrations = migrations.migrate(self.db, "sqlite", apply=auto_migrate)
 
     def close(self) -> None:
         self.db.close()

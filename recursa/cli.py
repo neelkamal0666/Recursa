@@ -40,6 +40,8 @@ optimizer:
   model: claude-opus-5-5
 budget:
   max_cost_usd_per_cycle: 5.0
+store:
+  auto_migrate: true        # false: refuse to open an out-of-date database; run `recursa db migrate`
 """
 
 REVIEWERS_TEMPLATE = """\
@@ -296,6 +298,30 @@ def cmd_audit(args: argparse.Namespace) -> None:
         print(f"{r['seq']:>5}  {r['actor']:<16} {r['action']:<24} {r['subject']}  {json.dumps(r['details'])[:100]}")
 
 
+def cmd_db(args: argparse.Namespace) -> None:
+    import sqlite3
+
+    from . import migrations
+
+    paths = Paths(load_config(args.config).home_path)
+    out = {}
+    for label, path in (("records", paths.db), ("sealed", paths.sealed_db)):
+        if not os.path.exists(path):
+            out[label] = {"path": path, "exists": False}
+            continue
+        db = sqlite3.connect(path, isolation_level=None)
+        try:
+            if args.db_cmd == "migrate":
+                out[label] = {"path": path, "applied": migrations.migrate(db, "sqlite")}
+            out[label] = {"path": path, **out.get(label, {}), **migrations.status(db, "sqlite")}
+        finally:
+            db.close()
+    _print(out)
+    if args.db_cmd == "status" and any(v.get("pending") or v.get("unknown") or v.get("modified")
+                                       for v in out.values()):
+        sys.exit(1)
+
+
 def cmd_ui(args: argparse.Namespace) -> None:
     from .ui import serve
 
@@ -368,6 +394,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("audit", help="show or verify the audit log")
     s.add_argument("--verify", action="store_true"); s.add_argument("--limit", type=int, default=50)
     s.set_defaults(fn=cmd_audit)
+    s = sub.add_parser("db", help="schema version and migrations")
+    x = s.add_subparsers(dest="db_cmd", required=True)
+    x.add_parser("status", help="show schema versions; exits 1 if anything is pending or mismatched")
+    x.add_parser("migrate", help="apply pending migrations")
+    s.set_defaults(fn=cmd_db)
     s = sub.add_parser("ui", help="local review dashboard")
     s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=8765)
     s.set_defaults(fn=cmd_ui)

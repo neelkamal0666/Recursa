@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sqlite3
 
 import pytest
@@ -11,6 +12,8 @@ from recursa.redact import Redactor
 from recursa.stats import GateConfig, compare, holm
 from recursa.store import Store
 from recursa.types import Candidate, Run, new_id, now
+
+from conftest import make_project
 
 
 # -- stats -----------------------------------------------------------------------------------------
@@ -297,3 +300,72 @@ def test_store_migrates_databases_without_telemetry(tmp_path):
     r = _run()
     s.put_run(r)
     assert s.get_run(r.id)["telemetry"] == "measured"
+
+
+# -- schema migrations ----------------------------------------------------------------------
+def test_fresh_store_records_every_migration(tmp_path):
+    from recursa import migrations
+
+    s = Store(str(tmp_path / "s.db"))
+    st = migrations.status(s.db)
+    assert st["current"] == st["latest"] == len(migrations.load())
+    assert st["pending"] == [] and s.applied_migrations == ["0001_initial", "0002_run_telemetry"]
+    with pytest.raises(sqlite3.IntegrityError):
+        s.db.execute("DELETE FROM schema_migrations")
+    s.close()
+    assert Store(str(tmp_path / "s.db")).applied_migrations == []  # idempotent on reopen
+
+
+def test_legacy_store_with_telemetry_is_adopted_without_reapplying(tmp_path):
+    path = str(tmp_path / "legacy.db")
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE runs (id TEXT PRIMARY KEY, agent TEXT, agent_version TEXT, mode TEXT, example_id TEXT, "
+                "sample INTEGER, status TEXT, input_json TEXT, output_json TEXT, steps_json TEXT, cost_usd REAL, "
+                "latency_ms REAL, started_at REAL, context_json TEXT, error TEXT, redaction TEXT, telemetry TEXT)")
+    old.close()
+    s = Store(path)
+    assert s.applied_migrations == ["0001_initial"]  # 0002's column already existed
+    r = _run()
+    s.put_run(r)
+    assert s.get_run(r.id)["telemetry"] == "measured"
+
+
+def test_store_refuses_out_of_date_schema_without_auto_migrate(tmp_path):
+    from recursa.migrations import SchemaError
+
+    path = str(tmp_path / "s.db")
+    with pytest.raises(SchemaError, match="recursa db migrate"):
+        Store(path, auto_migrate=False)
+    Store(path).close()
+    Store(path, auto_migrate=False).close()  # up to date: opens fine
+
+
+def test_store_refuses_newer_or_edited_schema(tmp_path):
+    from recursa.migrations import SchemaError
+
+    newer = str(tmp_path / "newer.db")
+    Store(newer).db.execute("INSERT INTO schema_migrations VALUES (99, 'future', 'x', 0)")
+    with pytest.raises(SchemaError, match="upgrade Recursa"):
+        Store(newer)
+
+    edited = str(tmp_path / "edited.db")
+    db = sqlite3.connect(edited)
+    db.executescript("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, "
+                     "checksum TEXT NOT NULL, applied_at REAL NOT NULL);"
+                     "INSERT INTO schema_migrations VALUES (1, 'initial', 'not-the-real-checksum', 0);")
+    db.close()
+    with pytest.raises(SchemaError, match="forward-only"):
+        Store(edited)
+
+
+def test_cli_db_status_and_migrate(tmp_path, capsys):
+    from recursa.cli import main
+
+    learner = make_project(tmp_path)
+    cfg = os.path.join(learner.cfg.root, "recursa.yaml")
+    learner.close()
+    main(["--config", cfg, "db", "status"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["records"]["pending"] == [] and out["records"]["current"] == out["records"]["latest"]
+    main(["--config", cfg, "db", "migrate"])
+    assert json.loads(capsys.readouterr().out)["records"]["applied"] == []

@@ -90,6 +90,17 @@ Labelled data is JSONL: `{"id", "input": {...}, "expected": {...}, "group", "tag
 - Retries are attempts nested inside one run id. Feedback is idempotent per key. Online traces go to an fsync'd write-ahead log first (`learner.flush()` ingests them).
 - A candidate goes stale after 7 days or when the baseline changes, and must then pass the gate again. "Request changes" with an edited prompt creates a new human-sourced candidate that must also pass the gate.
 
+## Schema and upgrades
+
+The store's schema lives in numbered, forward-only SQL migrations under [recursa/migrations/sqlite/](https://github.com/neelkamal0666/Recursa/tree/main/recursa/migrations/sqlite). A local store migrates itself when opened. Set `store.auto_migrate: false` to make it refuse an out-of-date database instead, and migrate explicitly:
+
+```bash
+recursa db status    # current/latest/pending for the records and sealed databases; exit 1 if anything is pending
+recursa db migrate   # apply pending migrations in one transaction
+```
+
+A store also refuses to open a database newer than the installed Recursa, or one whose applied migrations no longer match the shipped files.
+
 ## Reference agent
 
 [examples/triage/](https://github.com/neelkamal0666/Recursa/tree/main/examples/triage) is a support-ticket triage agent. It returns `{"category", "priority"}` and succeeds when both fields match the label. The design doc left the reference agent as an open decision, so this one is a stand-in:

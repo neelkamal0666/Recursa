@@ -289,6 +289,139 @@ Everything Recursa learns is an immutable, versioned record linked back to the r
 - **Production:** Postgres with pgvector, or Postgres + an external vector DB (Qdrant, Pinecone); object storage (S3, GCS) for traces and dataset snapshots.
 - **Datasets** snapshot to Parquet with a content hash, so an eval report always names the exact data it ran on.
 
+### Schema management
+
+The schema is owned by versioned, forward-only migrations that ship inside the package, one directory per backend (`recursa/migrations/sqlite/`, later `recursa/migrations/postgres/`). Files are numbered without gaps (`0001_initial.sql`, `0002_run_telemetry.sql`, …). Every backend keeps the same logical schema at the same version number, so a database can move between backends by export and import without schema drift.
+
+- **Ledger.** An append-only `schema_migrations` table records each applied migration's version, name, SHA-256 checksum and time.
+- **Checked on every open.** Before reading or writing, the store compares the ledger with the migrations it ships and refuses to run if:
+  - migrations are pending and auto-migration is off (the error says to run `recursa db migrate`);
+  - the database is newer than the release (upgrade Recursa; there are no automatic downgrades);
+  - an applied migration's file has changed since it ran (fix mistakes with a new migration, never by editing an old one).
+- **Atomic.** Each run applies all pending migrations in one transaction under a writer lock, so concurrent processes cannot both migrate, and a failed migration leaves the database unchanged.
+- **Who creates tables.**
+  - *SQLite (local):* the store migrates itself on open (`store.auto_migrate: true`, the default) to keep zero-setup development.
+  - *Postgres (production):* `auto_migrate` is forced off. Tables are created and changed only by `recursa db migrate`, run by the deployer (in CI/CD or as a release step) with a dedicated migrator role. Application processes check the version and refuse to start on a mismatch; they never run DDL.
+- **Commands.** `recursa db status` shows the current, latest and pending versions for the records and sealed databases, and exits non-zero on anything pending or mismatched (usable as a deploy check). `recursa db migrate` applies pending migrations.
+- **Pre-versioning databases.** Stores created by 0.1.0 before the ledger existed are adopted on first open: `0001` is idempotent and completes any missing tables, and later steps already present (for example the `telemetry` column) are recorded rather than reapplied.
+
+**Postgres roles and immutability.** Append-only must not depend on application code alone:
+
+| Role | Owns | Can do |
+| --- | --- | --- |
+| `recursa_migrator` | all tables | DDL; used only by `recursa db migrate` |
+| `recursa_app` | nothing | `SELECT`, `INSERT` on runs, scores, feedback, versions, deployments, approvals, audit, gate ledger, packets, insights; `SELECT`, `INSERT`, `UPDATE` on candidates and cycles (mutable workflow state) |
+| `recursa_gate` | nothing | `SELECT`, `INSERT` on the sealed schema; the optimizer's credentials have no grant there |
+
+Triggers that reject `UPDATE` and `DELETE` on the append-only tables are kept as a second line of defence. The audit log's hash chain is unchanged and is verified by `recursa audit --verify`.
+
+**Postgres type mapping.** JSON columns become `jsonb`; timestamps become `timestamptz`; auto-increment sequences become `bigint GENERATED ALWAYS AS IDENTITY`. Indexes: runs on `(agent_version, created_at)` and `(example_id)`, scores on `(run_id)`, approvals on `(candidate_id)`. Large step traces may move to object storage, with the row keeping a content-addressed reference.
+
+**Sealed data stays separate.** The gate and confirmation sets live in their own database (SQLite) or their own schema with a separate role (Postgres). Sharing one Postgres server must not let the optimizer process read sealed data; the isolation test suite covers this for each backend.
+
+## Deployment modes
+
+Recursa's main promises are trust boundaries: the optimizer cannot read gate data, records cannot be rewritten, every promotion has an authenticated approval, and the gate budget cannot be overspent. In a single process these are enforced by the library and a process sandbox, which is fine for one developer and not enough for a team. So Recursa runs in two modes behind one `Store` interface.
+
+| | **Embedded** (default, v1) | **Recursa Server** |
+| --- | --- | --- |
+| Who touches the database | the library, through SQLite | only the server |
+| Library talks to | a local SQLite file | the server's HTTP API, with role-scoped API keys |
+| Schema | migrates itself on open | `recursa db migrate` at deploy time or server start; clients never run DDL |
+| Immutability | triggers | no update/delete grant for the app role, plus triggers, plus the audit hash chain |
+| Sealed gate data | separate encrypted file | reachable only with a gate key |
+| Gate budget, approvals, audit | enforced by the library (bypassable by local code) | enforced by the server |
+| UI | local review UI (`recursa ui`) | admin console: reviews, operations, settings, server and database status |
+| MCP | none | a second interface on the same server for agent and reviewer tools |
+| Ships as | `pip install recursa` | `recursa server` and a Docker image; Postgres provided by the operator |
+
+Switching modes is configuration only: `store: {url: https://recursa.internal, key_env: RECURSA_API_KEY}` selects the server; no `url` means embedded.
+
+### Recursa Server
+
+**API keys are scoped by role.** The server checks the scope on every request, so each separation is a credential property rather than a sandbox:
+
+| Key | Can | Cannot |
+| --- | --- | --- |
+| `ingest` (production agents) | append runs and feedback | read anything |
+| `optimizer` | read train/dev runs and insights; write candidates | read gate or confirmation data; approve |
+| `gate` | fetch sealed examples; record gate results (the server charges the budget ledger) | write candidates; approve |
+| `reviewer` | read packets; approve, reject or request changes (passphrase login, approval bound to the packet hash) | anything else |
+| `admin` | manage reviewers, keys, data sealing and rotation | approve candidates |
+
+**The gate runs where the agent's code is.** Grading a candidate means running the agent on sealed examples, and the server does not execute user code. The gate worker therefore runs in the operator's environment with a `gate` key: it pulls sealed examples, runs the candidate and baseline, and posts per-example results. The server computes the statistics and verdict from those results, so the decision and the budget charge happen server-side. Optimizer and gate hold different credentials, which is the separation that matters.
+
+**Ingest never blocks the agent.** The SDK writes each run to its local write-ahead log, then ships batches with `POST /v1/runs:batch`, idempotent by run id. If the server is unreachable, runs wait in the log and the agent keeps serving. The server stamps the time it received each run, redacts PII before writing (failing closed), and appends the audit entry itself.
+
+**Server-measured telemetry (later).** An optional model proxy in the server forwards model calls and records tokens, cost and latency itself. Runs made through it are labelled `measured` by the server rather than by the client library, which closes the remaining gap where agent code in the same process could misreport its own usage.
+
+**Database roles (Postgres).** `recursa_migrator` owns the schema and is used only for migrations. `recursa_app` (the server's runtime role) has `SELECT` and `INSERT` on append-only tables and `UPDATE` only on mutable workflow state (candidates, cycles). The sealed schema is readable only through the gate endpoints. See *Schema management*.
+
+**Operations.** Health and readiness endpoints, `recursa db status` as a deploy check, Postgres backups as the source of truth, and the audit chain verifiable with `recursa audit --verify` against the server. The server is open source under the same Apache-2.0 licence as the library: the trust boundary is only worth something if it can be audited.
+
+### MCP interface
+
+MCP is designed for exposing tools and context to models, so it is the interface for agents and assistants, not the library's data path. Bulk, idempotent ingest of thousands of runs per cycle is a poor fit for session-based, one-call-at-a-time tool requests. The server exposes an MCP endpoint, authenticated with the same scoped keys, offering:
+
+- **For agents:** `memory.search`, `memory.record` (phase 3) and `feedback.submit`.
+- **For reviewers working through an assistant:** `review.list`, `review.show`, `versions.diff`, `audit.verify`. Approvals stay out of MCP: approving needs the reviewer's own interactive login, so an assistant can prepare a decision but not make it.
+
+### Admin console
+
+Recursa Server serves a web console for everything people do: reviewing and approving, operating the server, and governing the gate. It grows out of v1's local review UI (`recursa ui`).
+
+**One API, no back doors.** The console is a static single-page app bundled with the server. It calls the same public HTTP API as the CLI and SDK, with the signed-in user's own permissions. Anything it can do can be scripted, and nothing it does skips authorisation, validation or the audit log.
+
+**Sign-in and roles.** Users sign in through the organisation's identity provider (OIDC; SAML later), with local passphrase accounts for small installs. Console roles mirror the API key scopes:
+
+| Role | Can |
+| --- | --- |
+| Viewer | read dashboards, runs (redacted), eval reports, versions, audit log |
+| Reviewer | everything a viewer can, plus approve, reject or request changes for the surfaces assigned to them |
+| Operator | roll back, run cycles, seal and rotate datasets, manage API keys, run migrations |
+| Admin | manage users, roles, reviewer assignments, quorum rules and server settings |
+
+Separation of duties is enforced, not configured away. Admins and operators cannot approve candidates unless they also hold the reviewer role for that surface. Nobody can approve a candidate they proposed or edited. Approve, roll back, create an API key and change gate settings each require recent re-authentication (step-up with MFA where the identity provider supports it).
+
+**Pages.**
+
+- **Overview:** live version, open candidates, last cycle result, gate budget left per sealed-set version, ingest backlog, server health.
+- **Review queue:** the review packet (diff, gate and confirmation results with confidence bounds, guardrails, telemetry source, example cases side by side), with approve, reject and request changes. Request changes opens an editor and sends the edited prompt back through the gate. Quorum progress shows who has decided and who is still needed.
+- **Versions and deployments:** history, diff between any two versions with the evidence behind each change, and one-click rollback with a required reason.
+- **Cycles and candidates:** cycle runs, insights, every candidate and why it was rejected or proposed.
+- **Datasets:** split sizes, seal and rotate the gate and confirmation sets, gate budget usage. Sealed contents are never shown in the console.
+- **Runs and evals:** search and inspect traces (redacted), eval reports, telemetry source per run.
+- **Audit log:** filterable log with a "verify chain" action.
+- **Settings:** users and roles, reviewer surfaces and quorum, API keys (create, scope, rotate, revoke; secrets shown once), gate settings, retention and PII rules.
+- **Server and database:** see below.
+
+**Database and server configuration.** The console shows and operates the database but does not hold its credentials:
+
+- *Shown:* connection status (host, database, TLS, pool use; never the password), schema version, pending migrations, table sizes, last backup reported by the operator, ingest queue depth.
+- *Actions:* run pending migrations (the server uses the separate `recursa_migrator` credentials for this; the console user needs the operator role and step-up); test the connection; download a support bundle.
+- *Connection details* (URL, passwords, TLS certificates) come from environment variables or a secret manager (Vault, AWS/GCP secret managers). Changing them is a deployment change, not a console edit: a server that can rewrite its own database credentials from a web form can be pointed at an attacker's database by anyone who takes over an admin session.
+- *First run:* a fresh server with no admin starts in setup mode, reachable only with a one-time token printed to the server log. Setup checks the database connection, applies migrations, creates the first admin and then turns itself off.
+
+**Governed settings.** Gate settings (minimum gain, alpha, budget, guardrail limits, `allow_self_reported_telemetry`), quorum rules and reviewer assignments decide what can be promoted, so changing them is itself a reviewed change. The console proposes the change as a diff, a second admin approves it, and it takes effect as a new settings version recorded in the audit log. A gate decision always records the settings version it used, so loosening a threshold cannot quietly re-judge earlier candidates.
+
+**Safety in the browser.** Strict content security policy, HttpOnly SameSite cookies, CSRF tokens on every write, session timeout, and PII redaction applied server-side before any run reaches the page.
+
+### Comparison with LangGraph persistence
+
+LangGraph (as of mid-2026) also offers two modes. Its embedded checkpointers (`PostgresSaver`, `PostgresStore`) connect straight to Postgres from the application. `setup()` creates the tables, and versioned SQL migrations ship in the library and are tracked in a migrations table. Any process holding the connection string can read or overwrite any thread. Its hosted server (LangGraph Server, now offered under LangSmith) owns Postgres and Redis, exposes threads, runs, assistants and the store over HTTP, and handles persistence and queues. Self-hosting it in production has historically required a licence.
+
+Recursa follows the same shape: embedded for development, a server for teams. The reasons differ. LangGraph's server exists mainly for scale and operations. Recursa's exists for trust boundaries, so it adds role-scoped keys, server-side gate budget and approvals, append-only grants and a hash-chained audit log that LangGraph's persistence layer does not attempt.
+
+### Build order
+
+1. Extract a `Store` protocol; today's SQLite store becomes `LocalStore` behind it. No change for embedded users.
+2. `recursa server` (HTTP, Postgres, role grants, migrations) and an `HttpStore` client; ingest shipping from the WAL.
+3. Server-side gate statistics, budget ledger, approvals and audit appends; gate worker with a `gate` key.
+4. Admin console: sign-in and roles, review queue, versions and rollback, audit log, server and database status (the v1 local UI's features first).
+5. Console settings: API keys, users, governed gate settings with two-admin approval, setup mode.
+6. MCP interface on the server.
+7. Model proxy for server-measured telemetry.
+
 ## Public API and developer experience
 
 A developer should get a self-improving agent in under 20 lines, then customize one component at a time.
@@ -407,7 +540,7 @@ Phases 1 and 2 together form v1, cut down to the v1 scope above; phases 3 to 5 s
 2. **Closed loop:** feedback API, batch error analysis, prompt-rewrite optimizer (few-shot bootstrap moves to phase 3), promotion gate, HITL review queue and review packets, registry with rollback. Exit: one full learning cycle improves holdout score on a reference agent where the only human step is approving the change.
 3. **Memory and context:** four memory types, consolidation and forgetting jobs, context engine with budgets, memory usefulness tracking. Exit: measurable gain from memory on a multi-session benchmark.
 4. **Golden set growth:** failure mining, synthetic variants, review queue, coverage reports, holdout refresh. Exit: dataset grows from production with under 5% duplicate rate on review.
-5. **Scale and ecosystem:** framework adapters, Postgres and vector backends, OTel export, local UI, canary rollout, skill extraction. Later: trainer plugin for fine-tuning and RL from exported preference pairs.
+5. **Scale and ecosystem:** Recursa Server with Postgres and an admin console (see *Deployment modes*), MCP interface, vector backends, framework adapters, OTel export, local UI, canary rollout, skill extraction. Later: trainer plugin for fine-tuning and RL from exported preference pairs.
 
 ### Risks
 
@@ -420,5 +553,6 @@ Phases 1 and 2 together form v1, cut down to the v1 scope above; phases 3 to 5 s
 - Should the default reflection model be the agent's own model or a separate, stronger "teacher" model?
 - Single-agent first, or support multi-agent systems where each role learns separately?
 - Decided 20 Nov 2026: every promotion requires human approval in v1; Recursa suggests but never auto-promotes (see HITL pipeline).
-- Licence: Apache-2.0 or MIT?
+- Decided: Apache-2.0 for the library and the server.
+- Should the gate worker be able to run as a managed job inside the server for agents that are pure configuration (prompt plus hosted model), removing the need for operators to run it?
 - Which reference agent and primary metric does v1 use? It needs a deterministic success check and at least 400 labelled tasks (see v1 scope).

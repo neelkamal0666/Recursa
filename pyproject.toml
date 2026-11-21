@@ -43,5 +43,8 @@ recursa = "recursa.cli:main"
 [tool.setuptools.packages.find]
 include = ["recursa*"]
 
+[tool.setuptools.package-data]
+recursa = ["migrations/*/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

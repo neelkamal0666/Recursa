@@ -2,7 +2,25 @@
 
 All notable changes to Recursa. Versions follow semantic versioning; before 1.0, minor versions may break compatibility and say how to upgrade.
 
-## Unreleased (0.2.0)
+## Unreleased
+
+### Added: Recursa Server (preview; plan phase 2)
+
+- `recursa[server]` extra and `recursa server run | migrate | status | keys create/list/revoke`. The server owns Postgres and serves the store protocols over an HTTP API (`/v1`, OpenAPI at `/v1/openapi.json`), with `/healthz` and `/readyz`. It refuses to start unless the schema is at this release's version.
+- Postgres migrations (`recursa/migrations/postgres`), version-aligned with SQLite: `recursa` and `recursa_sealed` schemas, append-only triggers (including `TRUNCATE`), and `recursa_app` / `recursa_gate` group roles whose grants forbid updating or deleting records and keep the records role out of the sealed schema.
+- API keys with scopes (`ingest`, `optimizer`, `gate`, `reviewer`, `admin`), stored as SHA-256 hashes and shown once. Every route declares its scopes; tests check each route against every scope.
+- Client backend `HttpRecordStore` / `HttpSealedStore` (standard library only, keep-alive connections, retries for idempotent calls), selected by `store.url` and `store.key_env` (and optional `store.sealed_key_env`, `store.timeout`).
+- Write-ahead log shipping: `Learner.flush()` ships runs in idempotent batches and keeps unshipped files for the next attempt; `Learner.start_shipping()` does it in the background with backoff. Serving continues on the last-known live version if the store is unreachable.
+- `put_runs` batch method on the record store; sealed stores also hold runs, scores and the eval cache of gate evaluations (`EvalRunStore`).
+- Dockerfile and `docker-compose.yml` for trying the server; CI builds the image and checks the compose quick start, and runs the Postgres and server tests against a Postgres service.
+
+### Changed
+
+- Migration `0003_server_fields` (both backends): `runs.received_at` and an `api_keys` table.
+- Imported rows are re-redacted by the importing store.
+- `store.url` is accepted (it was rejected in phase 1); API keys in the config file are rejected in favour of environment variables.
+
+## Unreleased, continued: storage interface (plan phase 1)
 
 ### Added
 

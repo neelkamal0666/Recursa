@@ -8,12 +8,13 @@ import json
 import os
 import sqlite3
 import threading
-from dataclasses import asdict
 from typing import Any
 
 from .. import migrations
-from ..redact import RedactionError, Redactor
+from ..redact import Redactor
 from ..types import Candidate, Run, Score, canonical_json, content_hash, new_id, now
+from .common import (RUN_COLUMNS, RUN_JSON_COLUMNS, TRANSFER_TABLES, audit_entry, redact_run,
+                     redact_transfer_row, to_json_text, verify_chain)
 
 
 class LocalStore:
@@ -43,25 +44,28 @@ class LocalStore:
             self.db.execute(sql, args)
 
     # -- runs -------------------------------------------------------------------
+    def _insert_run(self, run: Run) -> bool:
+        row = redact_run(run, self.redactor)
+        for c in RUN_JSON_COLUMNS:
+            row[c] = to_json_text(row[c])
+        cur = self.db.execute(f"INSERT OR IGNORE INTO runs ({','.join(RUN_COLUMNS)}) "
+                              f"VALUES ({','.join('?' * len(RUN_COLUMNS))})", tuple(row[c] for c in RUN_COLUMNS))
+        return cur.rowcount == 1
+
     def put_run(self, run: Run) -> None:
-        try:
-            inp = self.redactor(run.input)
-            out = self.redactor(run.output)
-            steps = self.redactor([asdict(s) for s in run.steps])
-            ctx = self.redactor(run.context_snapshot)
-            err = self.redactor(run.error) if run.error else None
-            redaction = "applied"
-        except RedactionError:
-            # Fail closed: keep the run's metrics, never its raw payload.
-            inp = out = ctx = None
-            steps = [{k: v for k, v in asdict(s).items() if k not in ("input", "output")} for s in run.steps]
-            err, redaction = "redaction failed; payload dropped", "unredacted_dropped"
-        self._x(
-            "INSERT OR IGNORE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (run.id, run.agent, run.agent_version, run.mode, run.example_id, run.sample, run.status,
-             json.dumps(inp, default=str), json.dumps(out, default=str), json.dumps(steps, default=str),
-             run.cost_usd, run.latency_ms, run.started_at, json.dumps(ctx, default=str), err, redaction,
-             run.telemetry))
+        with self._lock:
+            self._insert_run(run)
+
+    def put_runs(self, runs: list[Run]) -> int:
+        with self._lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                n = sum(self._insert_run(r) for r in runs)
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return n
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         rows = self._q("SELECT * FROM runs WHERE id=?", (run_id,))
@@ -89,11 +93,9 @@ class LocalStore:
         return [self.get_run(r["id"]) for r in self._q(sql, (*args, limit))]
 
     # -- bulk transfer between stores (optimizer worker -> main store) -------------------------
-    TRANSFER_TABLES = ("runs", "scores", "eval_cache")
-
     def export_records(self) -> dict[str, list[dict[str, Any]]]:
         """Rows exactly as stored (already redacted), for import_records on another store."""
-        return {t: [dict(r) for r in self._q(f"SELECT * FROM {t}")] for t in self.TRANSFER_TABLES}
+        return {t: [dict(r) for r in self._q(f"SELECT * FROM {t}")] for t in TRANSFER_TABLES}
 
     def import_records(self, records: dict[str, list[dict[str, Any]]]) -> float:
         """Append another store's rows, skipping any already present. Returns the cost of
@@ -102,10 +104,11 @@ class LocalStore:
         with self._lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
-                for t in self.TRANSFER_TABLES:
+                for t in TRANSFER_TABLES:
                     cols = [r[1] for r in self.db.execute(f"PRAGMA table_info({t})")]
                     sql = f"INSERT OR IGNORE INTO {t} ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})"
                     for row in records.get(t, []):
+                        row = redact_transfer_row(t, row, self.redactor)
                         if self.db.execute(sql, tuple(row.get(c) for c in cols)).rowcount and t == "runs":
                             cost += row.get("cost_usd") or 0.0
                 self.db.execute("COMMIT")
@@ -244,13 +247,10 @@ class LocalStore:
         """Hash-chained audit log: each record commits to the one before it."""
         with self._lock:
             prev = self._q("SELECT hash FROM audit ORDER BY seq DESC LIMIT 1")
-            prev_hash = prev[0]["hash"] if prev else ""
-            at = now()
-            body = {"at": at, "actor": actor, "action": action, "subject": subject, "details": details or {},
-                    "prev": prev_hash}
+            e = audit_entry(prev[0]["hash"] if prev else "", actor, action, subject, details)
             self._x("INSERT INTO audit (at, actor, action, subject, details_json, prev_hash, hash) "
                     "VALUES (?,?,?,?,?,?,?)",
-                    (at, actor, action, subject, canonical_json(details or {}), prev_hash, content_hash(body)))
+                    (e["at"], actor, action, subject, canonical_json(e["details"]), e["prev_hash"], e["hash"]))
 
     def audit_log(self, after: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM audit WHERE seq > ? ORDER BY seq" + (" LIMIT ?" if limit is not None else "")
@@ -260,14 +260,7 @@ class LocalStore:
         return rows
 
     def verify_audit_chain(self) -> bool:
-        prev = ""
-        for r in self.audit_log():
-            body = {"at": r["at"], "actor": r["actor"], "action": r["action"], "subject": r["subject"],
-                    "details": r["details"], "prev": prev}
-            if r["prev_hash"] != prev or r["hash"] != content_hash(body):
-                return False
-            prev = r["hash"]
-        return True
+        return verify_chain(self.audit_log())
 
     # -- cycles (checkpoints) -----------------------------------------------------------
     def save_cycle(self, cycle_id: str, state: dict[str, Any]) -> None:

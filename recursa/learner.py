@@ -89,6 +89,9 @@ class Learner:
         self.open_splits = OpenSplits(self.paths)
         self._wal_lock = threading.Lock()
         self.dropped_traces = 0
+        self.ship_errors, self.last_ship_error = 0, ""
+        self._last_live: tuple[str, dict[str, Any]] | None = None
+        self.stale_version_serves = 0
         os.makedirs(self.paths.wal, exist_ok=True)
 
     # -- sealed side (gate process only) ---------------------------------------------------
@@ -133,10 +136,23 @@ class Learner:
         return v["config"]
 
     # -- online serving ----------------------------------------------------------------------
+    def _serving_version(self) -> tuple[str, dict[str, Any]]:
+        """The live version for serving. If the store is unreachable (e.g. Recursa Server
+        is down), keep serving the last version seen rather than failing requests."""
+        try:
+            self._last_live = self.current()
+        except PermissionError:
+            raise  # a revoked or wrong key is a configuration error, not an outage
+        except (OSError, RuntimeError) as e:
+            if self._last_live is None or "no agent version" in str(e):
+                raise
+            self.stale_version_serves += 1
+        return self._last_live
+
     async def run(self, task: dict[str, Any]) -> Run:
         """Serve one request with the current promoted version. The trace goes to a
         local write-ahead log; ``flush()`` moves it into the store (fail-open)."""
-        vid, cfg = self.current()
+        vid, cfg = self._serving_version()
         run = await self.agent.run(task, cfg, vid, mode="online")
         try:
             line = json.dumps(asdict(run), default=str)
@@ -148,25 +164,61 @@ class Learner:
             self.dropped_traces += 1
         return run
 
-    def flush(self) -> int:
+    def flush(self, batch: int = 500) -> int:
+        """Ship the write-ahead log to the store in idempotent batches. Returns how many
+        runs were new. If the store is unreachable the staged file stays on disk and the
+        next flush retries it, so no run is lost or stored twice."""
         path = os.path.join(self.paths.wal, "runs.jsonl")
         with self._wal_lock:
-            if not os.path.exists(path):
-                return 0
-            staged = path + f".{int(time.time() * 1000)}"
-            os.replace(path, staged)
+            if os.path.exists(path):
+                os.replace(path, path + f".{time.time_ns()}")
+        staged = sorted(f for f in os.listdir(self.paths.wal) if f.startswith("runs.jsonl."))
         n = 0
-        with open(staged) as f:
-            for line in f:
-                if line.strip():
-                    d = json.loads(line)
-                    d["steps"] = [Step(**s) for s in d["steps"]]
-                    run = Run(**d)
-                    if self.store.get_run(run.id) is None:
-                        self.store.put_run(run)
-                        n += 1
-        os.remove(staged)
+        for name in staged:
+            full = os.path.join(self.paths.wal, name)
+            runs = []
+            with open(full) as f:
+                for line in f:
+                    if line.strip():
+                        d = json.loads(line)
+                        d["steps"] = [Step(**s) for s in d["steps"]]
+                        runs.append(Run(**d))
+            for i in range(0, len(runs), batch):
+                n += self.store.put_runs(runs[i:i + batch])
+            os.remove(full)
         return n
+
+    def wal_bytes(self) -> int:
+        return sum(os.path.getsize(os.path.join(self.paths.wal, f)) for f in os.listdir(self.paths.wal)
+                   if f.startswith("runs.jsonl"))
+
+    def start_shipping(self, interval_s: float = 5.0, warn_bytes: int = 256 * 1024 * 1024) -> threading.Event:
+        """Flush the write-ahead log in a background thread every ``interval_s`` seconds,
+        backing off while the store is unreachable. Serving never waits on it. Returns an
+        Event; set it to stop shipping (a final flush is attempted)."""
+        stop = threading.Event()
+
+        def loop() -> None:
+            delay = interval_s
+            while not stop.wait(delay):
+                try:
+                    self.flush()
+                    self.ship_errors, delay = 0, interval_s
+                except Exception as e:  # noqa: BLE001 - keep serving; retry later
+                    self.ship_errors += 1
+                    self.last_ship_error = f"{type(e).__name__}: {e}"
+                    delay = min(interval_s * 2 ** self.ship_errors, 300.0)
+                    size = self.wal_bytes()
+                    if size > warn_bytes:
+                        print(f"recursa: write-ahead log is {size / 1e6:.0f} MB and the store is unreachable "
+                              f"({self.last_ship_error}); runs are kept, not dropped", file=sys.stderr)
+            try:
+                self.flush()
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=loop, name="recursa-wal-shipper", daemon=True).start()
+        return stop
 
     def feedback(self, run_id: str, kind: str = "explicit", value: float | None = None, correction: Any = None,
                  author: str = "user", idempotency_key: str | None = None) -> str:

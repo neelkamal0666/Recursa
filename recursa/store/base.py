@@ -1,12 +1,15 @@
 """The storage interface every backend implements.
 
-Two protocols, because the two sides hold different secrets and will get different
-credentials once Recursa Server exists (see the design doc, *Deployment modes*):
+Two protocols, because the two sides hold different secrets and get different
+credentials in Recursa Server (see the design doc, *Deployment modes*):
 
 - ``RecordStore``: runs, scores, eval cache, feedback, versions and deployments,
   candidates, insights, approvals, the audit log and cycle checkpoints.
-- ``SealedStore``: the gate side: the gate-budget ledger, gate checkpoints and
-  review packets. The optimizer never gets one.
+- ``SealedStore``: the gate side: runs and scores of evaluations on the sealed gate
+  and confirmation sets (their inputs are sealed examples), the gate-budget ledger,
+  gate checkpoints and review packets. The optimizer never gets one.
+
+Both include ``EvalRunStore``, the part the eval runner needs.
 
 Semantics every backend must honour (checked by ``tests/test_store_contract.py``):
 
@@ -23,6 +26,10 @@ Semantics every backend must honour (checked by ``tests/test_store_contract.py``
 - **Pagination.** List methods take ``limit`` and a cursor taken from the last item
   of the previous page (a run id, an audit ``seq``, a candidate id), so a remote
   backend never has to return an unbounded list.
+- **Transfer format.** ``export_records``/``import_records`` exchange rows in the
+  SQLite column layout (JSON columns as text, e.g. ``input_json``), whatever the
+  backend, so a local scratch store can be imported into any other. Importing
+  re-applies the importing store's redaction.
 - **Missing records** return ``None`` (or an empty list), never raise, except
   ``put_feedback`` on an unknown run, which raises ``KeyError``.
 """
@@ -34,12 +41,25 @@ from ..types import Candidate, Run, Score
 
 
 @runtime_checkable
-class RecordStore(Protocol):
-    # -- lifecycle ---------------------------------------------------------------------------
-    def close(self) -> None: ...
+class EvalRunStore(Protocol):
+    """What ``recursa.evals.run_eval`` needs: runs, their scores and the eval cache."""
 
+    def close(self) -> None: ...
+    def put_run(self, run: Run) -> None: ...
+    def get_run(self, run_id: str) -> dict[str, Any] | None: ...
+    def put_scores(self, scores: list[Score]) -> None: ...
+    def scores_for(self, run_id: str) -> list[Score]: ...
+    def cache_get(self, key: str) -> str | None: ...
+    def cache_put(self, key: str, run_id: str) -> None: ...
+
+
+@runtime_checkable
+class RecordStore(EvalRunStore, Protocol):
     # -- runs, scores, eval cache ------------------------------------------------------------
     def put_run(self, run: Run) -> None: ...
+    def put_runs(self, runs: list[Run]) -> int:
+        """Batch put (e.g. shipping the write-ahead log); returns how many were new."""
+        ...
     def get_run(self, run_id: str) -> dict[str, Any] | None: ...
     def list_runs(self, mode: str | None = None, limit: int = 100,
                   before: str | None = None) -> list[dict[str, Any]]:
@@ -99,8 +119,7 @@ class RecordStore(Protocol):
 
 
 @runtime_checkable
-class SealedStore(Protocol):
-    def close(self) -> None: ...
+class SealedStore(EvalRunStore, Protocol):
 
     # -- gate budget ledger ------------------------------------------------------------------
     def ledger_add(self, gate_version: str, candidate_id: str, kind: str) -> bool:

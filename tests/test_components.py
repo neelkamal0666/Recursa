@@ -309,7 +309,7 @@ def test_fresh_store_records_every_migration(tmp_path):
     s = Store(str(tmp_path / "s.db"))
     st = migrations.status(s.db)
     assert st["current"] == st["latest"] == len(migrations.load())
-    assert st["pending"] == [] and s.applied_migrations == ["0001_initial", "0002_run_telemetry"]
+    assert st["pending"] == [] and s.applied_migrations == [m.label for m in migrations.load()]
     with pytest.raises(sqlite3.IntegrityError):
         s.db.execute("DELETE FROM schema_migrations")
     s.close()
@@ -324,7 +324,8 @@ def test_legacy_store_with_telemetry_is_adopted_without_reapplying(tmp_path):
                 "latency_ms REAL, started_at REAL, context_json TEXT, error TEXT, redaction TEXT, telemetry TEXT)")
     old.close()
     s = Store(path)
-    assert s.applied_migrations == ["0001_initial"]  # 0002's column already existed
+    assert "0002_run_telemetry" not in s.applied_migrations  # its column already existed
+    assert s.applied_migrations[0] == "0001_initial"
     r = _run()
     s.put_run(r)
     assert s.get_run(r.id)["telemetry"] == "measured"
@@ -401,14 +402,21 @@ def test_no_sql_or_backend_classes_outside_the_store():
     assert offenders == []
 
 
-def test_store_config_rejects_server_settings_until_supported(tmp_path):
+def test_store_config_validation():
+    import tempfile
+    from pathlib import Path
+
     from recursa.project import load_config
 
     base = "project: p\nfactory: m:f\n"
-    for extra, msg in (("store:\n  url: https://x\n", "Recursa Server"), ("store:\n  colour: red\n", "colour")):
-        p = tmp_path / "recursa.yaml"
-        p.write_text(base + extra)
-        with pytest.raises(ValueError, match=msg):
-            load_config(str(p))
-    p.write_text(base + "store:\n  auto_migrate: false\n")
-    assert load_config(str(p)).store == {"auto_migrate": False}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "recursa.yaml"
+        for extra, msg in (("store:\n  colour: red\n", "colour"), ("store:\n  url: ftp://x\n", "http"),
+                           ("store:\n  url: https://x\n  api_key: rk_1\n", "environment variable")):
+            p.write_text(base + extra)
+            with pytest.raises(ValueError, match=msg):
+                load_config(str(p))
+        p.write_text(base + "store:\n  url: https://recursa.internal\n  key_env: MY_KEY\n")
+        assert load_config(str(p)).store["url"] == "https://recursa.internal"
+        p.write_text(base + "store:\n  auto_migrate: false\n")
+        assert load_config(str(p)).store == {"auto_migrate": False}

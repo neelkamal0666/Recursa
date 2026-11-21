@@ -101,6 +101,47 @@ recursa db migrate   # apply pending migrations in one transaction
 
 A store also refuses to open a database newer than the installed Recursa, or one whose applied migrations no longer match the shipped files.
 
+## Recursa Server (preview)
+
+By default Recursa is embedded: the library writes to local SQLite files. For a team, run **Recursa Server**, which owns Postgres and exposes the store over an HTTP API. Projects switch with configuration only:
+
+```yaml
+store:
+  url: https://recursa.internal     # Recursa Server
+  key_env: RECURSA_API_KEY          # env var holding this process's API key
+  sealed_key_env: RECURSA_GATE_KEY  # optional: a separate key for the sealed side
+```
+
+Install and run (Postgres 14+):
+
+```bash
+pip install 'recursa[server]'
+export RECURSA_DATABASE_URL=postgresql://recursa_server:...@db/recursa          # role in recursa_app
+export RECURSA_SEALED_DATABASE_URL=postgresql://recursa_server_gate:...@db/recursa  # role in recursa_gate
+export RECURSA_MIGRATE_DATABASE_URL=postgresql://recursa_owner:...@db/recursa    # schema owner
+recursa server migrate                                     # creates schemas, tables, roles, grants
+recursa server keys create prod-agent --scope ingest       # secret is shown once
+recursa server run --host 0.0.0.0 --port 8080              # refuses to start on a schema mismatch
+```
+
+After the first migration, create the login roles the server uses (the migration creates the `recursa_app` and `recursa_gate` group roles and their grants):
+
+```sql
+CREATE ROLE recursa_server      LOGIN PASSWORD '...' IN ROLE recursa_app;
+CREATE ROLE recursa_server_gate LOGIN PASSWORD '...' IN ROLE recursa_gate;
+```
+
+Or try it with Docker: `docker compose up -d --build` (uses the owner for every connection; trial only).
+
+What the server enforces:
+
+- **API keys with scopes.** `ingest` (production agents: append runs and feedback, read the live version), `optimizer`, `gate`, `reviewer`, `admin`. Every route declares the scopes it accepts, and a test checks every route against every scope. An ingest key cannot read runs back; nothing but a gate key reaches the sealed side; only reviewers can approve (not admins).
+- **Append-only at the database.** The server's role has no `UPDATE`/`DELETE` on records, and triggers reject changes even for the owner. Gate runs live in a separate `recursa_sealed` schema that the records role cannot read.
+- **Redaction on the server** before anything is stored, including rows imported from the optimizer worker.
+- **Runs are never lost.** Agents write each run to a local write-ahead log and ship it in idempotent batches (`learner.start_shipping()`). If the server is down, runs wait on disk and serving continues on the last-known version.
+
+Phase 2 still runs the gate, approvals and audit appends in the client (with server-side keys and grants); phase 3 moves those decisions onto the server. See the [implementation plan](https://github.com/neelkamal0666/Recursa/blob/main/docs/implementation-plan.md).
+
 ## Reference agent
 
 [examples/triage/](https://github.com/neelkamal0666/Recursa/tree/main/examples/triage) is a support-ticket triage agent. It returns `{"category", "priority"}` and succeeds when both fields match the label. The design doc left the reference agent as an open decision, so this one is a stand-in:
@@ -127,7 +168,9 @@ Other adapters (LangGraph, Agent SDK, MCP), Postgres, OTel export, calibrated ju
 recursa/
   adapter.py   wrap(), Agent, Context: the v1 adapter contract
   trace.py     rc.trace.model(), @rc.tool(capability, mock): instrumentation + sandbox
-  store/       storage interface (RecordStore, SealedStore), open_* factories, LocalStore (SQLite)
+  store/       storage interface (RecordStore, SealedStore), open_* factories; backends:
+               local (SQLite), postgres (server side), http (client for Recursa Server)
+  server/      Recursa Server: FastAPI app, API keys, `recursa server` commands
   migrations/  numbered, forward-only schema migrations per backend
   clients.py   measured Anthropic clients (rc.clients)
   data.py      splits, sealing (AES-GCM), rotation

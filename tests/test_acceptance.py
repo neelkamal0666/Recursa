@@ -5,7 +5,18 @@ import pytest
 
 from recursa.auth import Auth, AuthError
 
-from conftest import PASS
+from conftest import PASS, make_project
+
+
+@pytest.fixture(params=["local", "server"])
+def learner(request, tmp_path):
+    """Every acceptance criterion holds with the embedded store and with Recursa Server."""
+    if request.param == "server":
+        yield request.getfixturevalue("server_learner")
+        return
+    lr = make_project(tmp_path)
+    yield lr
+    lr.close()
 
 
 def _cycle_to_review(learner):
@@ -107,11 +118,13 @@ def test_rollback_restores_previous_version(learner, token):
 # 7 is in test_isolation.py (optimizer has no read access to sealed data).
 
 
-def test_stale_candidate_cannot_be_approved(learner, token):
+def test_stale_candidate_cannot_be_approved(learner, token, monkeypatch):
+    import recursa.learner
+
     cid = _cycle_to_review(learner)
     h, _ = learner.packet(cid)
-    c = learner.store.get_candidate(cid)
-    learner.store._x("UPDATE candidates SET created_at=? WHERE id=?", (c.created_at - 8 * 86400, cid))
+    real_now = recursa.learner.now
+    monkeypatch.setattr(recursa.learner, "now", lambda: real_now() + 8 * 86400)  # eight days later
     with pytest.raises(RuntimeError, match="stale"):
         learner.decide(cid, "approve", token, h)
     assert learner.store.get_candidate(cid).status == "stale"

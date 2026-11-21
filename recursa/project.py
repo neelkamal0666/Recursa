@@ -47,16 +47,18 @@ class Config:
         return os.path.join(self.root, self.reviewers)
 
 
-STORE_KEYS = {"auto_migrate"}
+STORE_KEYS = {"auto_migrate", "url", "key_env", "sealed_key_env", "timeout"}
 
 
 def _check_store(store: dict[str, Any]) -> dict[str, Any]:
-    if "url" in store or "key_env" in store:
-        raise ValueError("store.url / store.key_env select Recursa Server, which is not available yet (planned for "
-                         "0.3); remove them to use the local store")
+    if {"key", "api_key", "token"} & set(store):
+        raise ValueError("put API keys in an environment variable named by store.key_env, not in the config")
     unknown = set(store) - STORE_KEYS
     if unknown:
         raise ValueError(f"unknown store setting(s): {', '.join(sorted(unknown))}")
+    url = store.get("url")
+    if url is not None and not str(url).startswith(("http://", "https://")):
+        raise ValueError(f"store.url must be an http(s) URL of Recursa Server, got {url!r}")
     return store
 
 

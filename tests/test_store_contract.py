@@ -1,7 +1,7 @@
 """Contract every storage backend must pass (semantics in recursa/store/base.py).
 
-Only protocol methods are used here, never SQL, so the same tests will run against
-the Postgres store and the HTTP client when they exist: add them to BACKENDS.
+Only protocol methods are used here, never SQL, so every backend runs the same
+tests: SQLite, Postgres, and the HTTP client talking to Recursa Server.
 Backend-specific guarantees (e.g. SQLite triggers rejecting raw UPDATEs) are tested
 next to the backend instead.
 """
@@ -14,11 +14,28 @@ from recursa.store import LocalStore, RecordStore, SealedStore
 from recursa.types import Candidate, Run, Score, Step, content_hash, new_id, now
 
 
-def _local(tmp_path, redactor):
+def _local(request, tmp_path, redactor):
     return LocalStore(str(tmp_path / "records.db"), redactor=redactor), LocalStore(str(tmp_path / "sealed.db"))
 
 
-BACKENDS = {"local": _local}
+def _postgres(request, tmp_path, redactor):
+    from recursa.store.postgres import PostgresRecordStore, PostgresSealedStore
+
+    url = request.getfixturevalue("pg_database")()
+    return PostgresRecordStore(url, redactor=redactor), PostgresSealedStore(url)
+
+
+def _http(request, tmp_path, redactor):
+    from recursa.store.http import HttpRecordStore, HttpSealedStore
+
+    if redactor is not None:
+        pytest.skip("the server applies its own redaction; a client-side redactor does not apply")
+    url, mint, _ = request.getfixturevalue("recursa_server")()
+    key = mint("ingest", "optimizer", "gate", "reviewer", "admin")
+    return HttpRecordStore(url, key), HttpSealedStore(url, key)
+
+
+BACKENDS = {"local": _local, "postgres": _postgres, "http": _http}
 
 
 @pytest.fixture(params=sorted(BACKENDS))
@@ -28,7 +45,7 @@ def make(request, tmp_path):
     def factory(redactor=None, sub="a"):
         d = tmp_path / sub
         d.mkdir(exist_ok=True)
-        pair = BACKENDS[request.param](d, redactor)
+        pair = BACKENDS[request.param](request, d, redactor)
         opened.extend(pair)
         return pair
 

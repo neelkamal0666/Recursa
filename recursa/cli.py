@@ -301,7 +301,11 @@ def cmd_audit(args: argparse.Namespace) -> None:
 def cmd_db(args: argparse.Namespace) -> None:
     from . import migrations
 
-    paths = Paths(load_config(args.config).home_path)
+    cfg = load_config(args.config)
+    if cfg.store.get("url"):
+        sys.exit(f"this project uses Recursa Server ({cfg.store['url']}); its schema is managed on the server "
+                 "with `recursa server status` / `recursa server migrate`")
+    paths = Paths(cfg.home_path)
     out = {}
     for label, path in (("records", paths.db), ("sealed", paths.sealed_db)):
         if not os.path.exists(path):
@@ -312,6 +316,42 @@ def cmd_db(args: argparse.Namespace) -> None:
     if args.db_cmd == "status" and any(v.get("pending") or v.get("unknown") or v.get("modified")
                                        for v in out.values()):
         sys.exit(1)
+
+
+def cmd_server(args: argparse.Namespace) -> None:
+    try:
+        import fastapi, psycopg, psycopg_pool, uvicorn  # noqa: E401, F401
+
+        from . import server
+    except ImportError as e:
+        sys.exit(f"Recursa Server needs extra packages: pip install 'recursa[server]' ({e})")
+    if args.server_cmd == "run":
+        server.serve(host=args.host, port=args.port, run_migrations=args.migrate)
+    elif args.server_cmd == "migrate":
+        _print(server.migrate(server.urls()["migrate"]))
+    elif args.server_cmd == "status":
+        st = server.status(server.urls()["records"])
+        _print(st)
+        if st["pending"] or st["unknown"] or st["modified"]:
+            sys.exit(1)
+    elif args.server_cmd == "keys":
+        import psycopg
+
+        from .server import keys
+        from .types import now
+
+        with psycopg.connect(server.urls()["migrate"]) as conn:
+            if args.keys_cmd == "create":
+                expires = now() + args.expires_days * 86400 if args.expires_days else None
+                key_id, token = keys.create(conn, args.name, args.scope, expires)
+                print(f"created key {key_id} ({args.name}; scopes: {', '.join(sorted(set(args.scope)))})")
+                print(f"secret (shown once, store it now): {token}")
+            elif args.keys_cmd == "list":
+                _print(keys.list_keys(conn))
+            elif args.keys_cmd == "revoke":
+                if not keys.revoke(conn, args.key_id):
+                    sys.exit(f"no active key {args.key_id}")
+                print(f"revoked {args.key_id}")
 
 
 def cmd_ui(args: argparse.Namespace) -> None:
@@ -391,6 +431,22 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_parser("status", help="show schema versions; exits 1 if anything is pending or mismatched")
     x.add_parser("migrate", help="apply pending migrations")
     s.set_defaults(fn=cmd_db)
+    s = sub.add_parser("server", help="Recursa Server: run, migrate, status, API keys (needs recursa[server])")
+    x = s.add_subparsers(dest="server_cmd", required=True)
+    y = x.add_parser("run", help="serve the API (refuses to start on a schema mismatch)")
+    y.add_argument("--host", default="127.0.0.1"); y.add_argument("--port", type=int, default=8080)
+    y.add_argument("--migrate", action="store_true", help="apply pending migrations first (owner credentials)")
+    x.add_parser("migrate", help="apply pending migrations with RECURSA_MIGRATE_DATABASE_URL")
+    x.add_parser("status", help="schema version; exits 1 if anything is pending or mismatched")
+    k = x.add_parser("keys", help="create, list or revoke API keys")
+    ksub = k.add_subparsers(dest="keys_cmd", required=True)
+    y = ksub.add_parser("create"); y.add_argument("name")
+    y.add_argument("--scope", action="append", required=True,
+                   choices=["ingest", "optimizer", "gate", "reviewer", "admin"], help="repeat for several")
+    y.add_argument("--expires-days", type=float)
+    ksub.add_parser("list")
+    y = ksub.add_parser("revoke"); y.add_argument("key_id")
+    s.set_defaults(fn=cmd_server)
     s = sub.add_parser("ui", help="local review dashboard")
     s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=8765)
     s.set_defaults(fn=cmd_ui)

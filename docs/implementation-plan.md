@@ -25,7 +25,7 @@ Known gaps carried into this plan:
 | --- | --- | --- | --- | --- |
 | 0 | Stabilise and release 0.1.1 (done except live run and release) | none | 1 week | 0.1.1 |
 | 1 | Store interface (done, unreleased) | 0 | 1.5 weeks | 0.2.0 |
-| 2 | Recursa Server core | 1 | 4 weeks | 0.3.0 |
+| 2 | Recursa Server core (done, unreleased; image not yet published) | 1 | 4 weeks | 0.3.0 |
 | 3 | Server-side governance and gate worker | 2 | 3 weeks | 0.4.0 |
 | 4 | Admin console: reviews and operations | 3 | 4 weeks | 0.5.0 |
 | 5 | Admin console: settings and administration | 4 | 3 weeks | 0.6.0 |
@@ -121,7 +121,7 @@ Cross-cutting rules for every phase:
 2. **Roles.** `0003_roles.sql` (both backends where meaningful): `recursa_migrator`, `recursa_app`, `recursa_gate`, with grants: `recursa_app` gets `SELECT, INSERT` on append-only tables and `UPDATE` only on `candidates` and `cycles`. Sealed tables live in a separate `sealed` schema granted only to `recursa_gate`.
 3. **`PostgresStore`** implementing the phase 1 protocol, used only inside the server. Must pass the contract suite (run in CI against a Postgres service container).
 4. **HTTP API v1** (`/v1/...`): resources mirroring the protocol: runs (`POST /v1/runs:batch`), scores, feedback, versions, deployments, candidates, insights, approvals, audit, cycles, packets. JSON bodies use the existing dataclass shapes; OpenAPI published at `/v1/openapi.json`.
-5. **API keys.** `api_keys` table (hashed with a per-key salt; secret shown once), scopes `ingest`, `optimizer`, `gate`, `reviewer`, `admin`. Middleware checks scope per route. CLI: `recursa server keys create --scope ingest --name prod-agent`.
+5. **API keys.** `api_keys` table (SHA-256 of a 256-bit random secret; secret shown once), scopes `ingest`, `optimizer`, `gate`, `reviewer`, `admin`. Middleware checks scope per route. CLI: `recursa server keys create --scope ingest --name prod-agent`.
 6. **`HttpStore` client** implementing the protocol over HTTP with retries, timeouts and idempotency keys. Selected by `store: {url: ..., key_env: RECURSA_API_KEY}`.
 7. **Ingest from the WAL.** The SDK appends runs to the existing local write-ahead log; a background shipper sends batches to `POST /v1/runs:batch`, idempotent by run id; backoff when the server is down; a cap on WAL size with a loud warning (never silently drop). Server stamps `received_at`, redacts PII (fails closed) and appends the audit entry.
 8. **Health:** `/healthz` (process up), `/readyz` (database reachable and schema up to date; server refuses to serve writes on a schema mismatch).
@@ -336,8 +336,8 @@ Corresponds to design-doc phase 5 (remaining items). Ongoing; pick by user deman
 
 | When | Decision |
 | --- | --- |
-| Phase 2 start | FastAPI or Starlette; container registry for the server image |
-| Phase 2 start | Whether `PostgresStore` may also be used directly in embedded mode (design doc currently says server-only) |
+| Phase 2 start | ~~FastAPI or Starlette~~ FastAPI (decided in phase 2). Still open: container registry for the server image (built and tested in CI, not published) |
+| Phase 2 start | Whether `PostgresStore` may also be used directly in embedded mode (phase 2 kept it server-only) |
 | Phase 3 | Whether pure-configuration agents can be gated inside the server (removes the operator-run gate worker for them) |
 | Phase 4 start | Console framework (plan assumes React and Vite) and which identity providers to test against |
 | Phase 7 | Whether to support providers other than Anthropic in the proxy |

@@ -17,6 +17,16 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+    services:
+      postgres:  # for the Postgres store, Recursa Server and server-mode acceptance tests
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      RECURSA_TEST_PG_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,8 +37,32 @@ jobs:
       - name: End-to-end demo
         run: bash examples/triage/demo.sh
 
+  server-image:
+    # Builds the Docker image and checks the compose quick start end to end.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Postgres, migrate, start the server
+        run: |
+          docker compose up -d --build
+          for i in $(seq 60); do curl -fsS http://127.0.0.1:8080/readyz && break; sleep 2; done
+      - name: Server is ready and its schema is current
+        run: |
+          curl -fsS http://127.0.0.1:8080/readyz
+          docker compose exec -T server recursa server status
+      - name: A key works, and only for its scopes
+        run: |
+          key=$(docker compose exec -T server recursa server keys create ci --scope ingest | sed -n 's/^secret.*: //p')
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" http://127.0.0.1:8080/v1/deployments/current)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" http://127.0.0.1:8080/v1/runs)" = 403
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/v1/runs)" = 401
+      - if: failure()
+        run: docker compose logs
+      - if: always()
+        run: docker compose down -v
+
   build:
-    needs: test
+    needs: [test, server-image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

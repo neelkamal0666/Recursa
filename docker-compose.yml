@@ -1,0 +1,36 @@
+# Try Recursa Server locally:  docker compose up -d --build
+# then create a key:           docker compose exec server recursa server keys create me --scope admin
+#
+# For a trial this uses the database owner for every connection. In production, run
+# migrations as the owner and give the server login roles that are members of
+# recursa_app and recursa_gate (see "Recursa Server" in the README).
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: recursa
+      POSTGRES_PASSWORD: recursa-dev-only
+      POSTGRES_DB: recursa
+    volumes: [pgdata:/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recursa -d recursa"]
+      interval: 2s
+      retries: 30
+
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment: &db_env
+      RECURSA_DATABASE_URL: postgresql://recursa:recursa-dev-only@db:5432/recursa
+    depends_on:
+      db: {condition: service_healthy}
+
+  server:
+    build: .
+    environment: *db_env
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+volumes:
+  pgdata:

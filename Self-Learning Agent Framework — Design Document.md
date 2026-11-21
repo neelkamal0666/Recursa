@@ -315,7 +315,7 @@ The schema is owned by versioned, forward-only migrations that ship inside the p
 
 Triggers that reject `UPDATE` and `DELETE` on the append-only tables are kept as a second line of defence. The audit log's hash chain is unchanged and is verified by `recursa audit --verify`.
 
-**Postgres type mapping.** JSON columns become `jsonb`; timestamps become `timestamptz`; auto-increment sequences become `bigint GENERATED ALWAYS AS IDENTITY`. Indexes: runs on `(agent_version, created_at)` and `(example_id)`, scores on `(run_id)`, approvals on `(candidate_id)`. Large step traces may move to object storage, with the row keeping a content-addressed reference.
+**Postgres type mapping.** JSON columns become `jsonb`, except hash-committed content (audit details, review packets), which stays `text` so its bytes never change. Times stay epoch seconds (`double precision`) so they round-trip exactly through the store interface; reporting views can expose `timestamptz`. Auto-increment sequences become `bigint GENERATED ALWAYS AS IDENTITY`. Indexes: runs on `(agent_version, created_at)` and `(example_id)`, scores on `(run_id)`, approvals on `(candidate_id)`. Large step traces may move to object storage, with the row keeping a content-addressed reference.
 
 **Sealed data stays separate.** The gate and confirmation sets live in their own database (SQLite) or their own schema with a separate role (Postgres). Sharing one Postgres server must not let the optimizer process read sealed data; the isolation test suite covers this for each backend.
 
@@ -343,7 +343,7 @@ Switching modes is configuration only: `store: {url: https://recursa.internal, k
 
 | Key | Can | Cannot |
 | --- | --- | --- |
-| `ingest` (production agents) | append runs and feedback | read anything |
+| `ingest` (production agents) | append runs and feedback; read the live version's configuration | read runs, feedback, candidates, audit or sealed data |
 | `optimizer` | read train/dev runs and insights; write candidates | read gate or confirmation data; approve |
 | `gate` | fetch sealed examples; record gate results (the server charges the budget ledger) | write candidates; approve |
 | `reviewer` | read packets; approve, reject or request changes (passphrase login, approval bound to the packet hash) | anything else |

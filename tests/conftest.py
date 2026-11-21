@@ -21,6 +21,7 @@ gate:
   confirm_min_examples: 100
   samples: 3
   bootstrap: 2000
+  allow_self_reported_telemetry: {self_reported}
 optimizer:
   strategy: heuristic
   candidates: 4
@@ -42,7 +43,7 @@ quorum:
 PASS = "correct-horse-battery"
 
 
-def make_project(tmp_path, budget=20):
+def make_project(tmp_path, budget=20, self_reported=True):
     import generate  # examples/triage/generate.py
 
     from recursa.data import Paths, split_and_seal
@@ -53,7 +54,7 @@ def make_project(tmp_path, budget=20):
     d = tmp_path / "proj"
     d.mkdir()
     shutil.copy(os.path.join(EXAMPLE, "triage_agent.py"), d / "triage_agent.py")
-    (d / "recursa.yaml").write_text(CONFIG.format(budget=budget))
+    (d / "recursa.yaml").write_text(CONFIG.format(budget=budget, self_reported=str(self_reported).lower()))
     (d / "reviewers.yaml").write_text(REVIEWERS)
     cfg = load_config(str(d / "recursa.yaml"))
     split_and_seal(Paths(cfg.home_path), [Example.from_dict(r) for r in generate.generate(800, 7, "t")])

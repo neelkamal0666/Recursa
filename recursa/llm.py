@@ -17,9 +17,12 @@ class LLMRefusal(RuntimeError):
     pass
 
 
-def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+def cost_usd(model: str, input_tokens: int, output_tokens: int, cache_read_tokens: int = 0,
+             cache_write_tokens: int = 0) -> float:
+    """USD for one call. Cache reads bill at 5% of input, 5-minute cache writes at 125%."""
     pin, pout = PRICES.get(model, (0.0, 0.0))
-    return (input_tokens * pin + output_tokens * pout) / 1_000_000
+    return (input_tokens * pin + output_tokens * pout + cache_read_tokens * pin * 0.05
+            + cache_write_tokens * pin * 1.25) / 1_000_000
 
 
 def complete(prompt: str, system: str | None = None, model: str = DEFAULT_MODEL, effort: str = "high",

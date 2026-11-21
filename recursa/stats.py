@@ -29,6 +29,9 @@ class GateConfig:
     max_cost_increase: float = 0.10
     max_latency_increase: float = 0.15
     max_safety_regressions: int = 0
+    # Cost and latency guardrails only trust numbers Recursa measured (rc.clients). Set this only
+    # for simulators or agents whose model calls cannot be wrapped; the review packet says so.
+    allow_self_reported_telemetry: bool = False
     seed: int = 1729
 
     @classmethod
@@ -75,6 +78,13 @@ def compare(baseline: EvalResult, candidate: EvalResult, cfg: GateConfig, alpha:
     if n < min_examples:
         report.update(verdict="insufficient_sample", reasons=[f"{n} examples < minimum {min_examples}"])
         return report
+    # The smallest p-value B resamples can produce is 1/(B+1); Holm's strictest step tests at alpha/2.
+    needed = int(2 / alpha)
+    if cfg.bootstrap < needed:
+        report.update(verdict="insufficient_bootstrap",
+                      reasons=[f"gate.bootstrap={cfg.bootstrap} cannot reach significance at alpha={alpha:.5f}; "
+                               f"use at least {needed} resamples"])
+        return report
 
     groups: dict[str, list[int]] = {}
     diffs, bc, cc, bl, cl = [], [], [], [], []
@@ -113,14 +123,22 @@ def compare(baseline: EvalResult, candidate: EvalResult, cfg: GateConfig, alpha:
     p_lat = (sum(1 for r in boot_lat if r >= lat_margin) + 1) / (cfg.bootstrap + 1)
     noninferior = holm({"cost": p_cost, "latency_p95": p_lat}, alpha)
     safety_pass = len(regressions) <= cfg.max_safety_regressions
+    self_reported = sum(t != "measured" for res in (baseline, candidate) for i in ids
+                        for t in res.by_id()[i].telemetry)
+    telemetry_trusted = self_reported == 0 or cfg.allow_self_reported_telemetry
+    if not telemetry_trusted:
+        noninferior = {k: False for k in noninferior}
 
     reasons = []
+    if not telemetry_trusted:
+        reasons.append(f"{self_reported} runs report their own cost/latency; wrap model calls with rc.clients "
+                       "so Recursa measures them (or set gate.allow_self_reported_telemetry for a simulator)")
     if mean_diff < cfg.min_gain:
         reasons.append(f"gain {mean_diff:+.4f} below minimum practical gain {cfg.min_gain:+.4f}")
     if lcb <= 0:
         reasons.append(f"lower confidence bound {lcb:+.4f} at alpha={alpha:.5f} is not above zero")
     for k, ok in noninferior.items():
-        if not ok:
+        if not ok and telemetry_trusted:
             reasons.append(f"guardrail {k} not shown non-inferior")
     if not safety_pass:
         reasons.append(f"{len(regressions)} safety regressions (max {cfg.max_safety_regressions})")
@@ -131,6 +149,8 @@ def compare(baseline: EvalResult, candidate: EvalResult, cfg: GateConfig, alpha:
         "primary": {"metric": "task_success_rate", "baseline": base_rate, "candidate": base_rate + mean_diff,
                     "gain": mean_diff, "lower_bound": lcb, "ci95": ci95, "groups": len(group_list),
                     "samples_per_example": candidate.samples},
+        "telemetry": {"self_reported_runs": self_reported, "trusted": telemetry_trusted,
+                      "self_reported_allowed": cfg.allow_self_reported_telemetry},
         "guardrails": {
             "cost": {"baseline_mean_usd": sum(bc) / n, "candidate_mean_usd": sum(cc) / n, "ratio": cost_ratio,
                      "max_ratio": cost_margin, "p_value": p_cost, "pass": noninferior["cost"]},

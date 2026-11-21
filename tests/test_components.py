@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 
 import pytest
@@ -35,6 +36,8 @@ def test_compare_detects_real_gain_and_guardrail_breach():
     base = _res(lambda i: 1.0 if i % 10 < 6 else 0.0)
     good = _res(lambda i: 1.0 if i % 10 < 8 else 0.0)
     assert compare(base, good, cfg, 0.0025, 150)["verdict"] == "eligible"
+    for r in (base, good):  # telemetry defaults to empty in these synthetic results (= measured)
+        assert all(not e.telemetry for e in r.examples)
     pricey = _res(lambda i: 1.0 if i % 10 < 8 else 0.0, cost=1.5)
     r = compare(base, pricey, cfg, 0.0025, 150)
     assert r["verdict"] == "not_eligible" and not r["guardrails"]["cost"]["pass"]
@@ -195,3 +198,102 @@ def test_reflection_finds_every_cause_in_a_mixed_cluster():
     assert len(insights) == 2 and all(i.frequency == 6 for i in insights)
     assert any("production" in c or "down" in c for c in cues)
     assert any(w in c for c in cues for w in ("users", "blocked", "all"))
+
+
+# -- measured telemetry (rc.clients) ------------------------------------------------------------------
+class _FakeMessages:
+    def __init__(self, model="claude-opus-5-5", fail=False):
+        self.model, self.fail = model, fail
+
+    async def create(self, **kw):
+        from types import SimpleNamespace as NS
+
+        if self.fail:
+            raise RuntimeError("overloaded")
+        await asyncio.sleep(0.01)
+        return NS(model=self.model, stop_reason="end_turn",
+                  content=[NS(type="text", text='{"category": "billing", "priority": "normal"}')],
+                  usage=NS(input_tokens=1000, output_tokens=200, cache_read_input_tokens=500,
+                           cache_creation_input_tokens=0))
+
+
+def _fake_client(**kw):
+    from types import SimpleNamespace as NS
+
+    m = _FakeMessages(**kw)
+    return NS(messages=m, beta=NS(messages=m))
+
+
+def _measured_agent(fake, report_usage=False):
+    client = rc.clients.AsyncAnthropic(client=fake)
+
+    async def agent(task, ctx):
+        resp = await client.beta.messages.create(model="claude-opus-5-5", max_tokens=100,
+                                                 messages=[{"role": "user", "content": task["t"]}])
+        if report_usage:  # an agent that also self-reports (here: wrongly, $0) through rc.trace
+            async with rc.trace.model("claude-opus-5-5") as call:
+                call.set_usage(0, 0, 0.0)
+        return json.loads(resp.content[0].text)
+
+    return rc.wrap(agent, "m", {"system_prompt": "p"})
+
+
+def test_clients_measure_usage_cost_and_latency():
+    a = _measured_agent(_fake_client())
+    run = asyncio.run(a.run({"t": "hi"}, a.default_config(), "v1", mode="eval", example_id="e", sample=0))
+    (step,) = run.steps
+    assert run.telemetry == "measured" and step.measured
+    assert (step.input_tokens, step.output_tokens) == (1000, 200)
+    # 1000 in @ $4/M + 200 out @ $20/M + 500 cache reads @ 5% of input price
+    assert step.cost_usd == pytest.approx((1000 * 4 + 200 * 20 + 500 * 4 * 0.05) / 1e6)
+    assert run.cost_usd == step.cost_usd and step.latency_ms >= 10
+
+
+def test_self_reporting_or_unpriced_models_are_not_measured():
+    a = _measured_agent(_fake_client(), report_usage=True)
+    run = asyncio.run(a.run({"t": "hi"}, a.default_config(), "v1", mode="eval"))
+    assert run.telemetry == "self_reported"
+    b = _measured_agent(_fake_client(model="some-unpriced-model"))
+    run = asyncio.run(b.run({"t": "hi"}, b.default_config(), "v1", mode="eval"))
+    assert run.telemetry == "self_reported" and run.steps[0].provider_metadata["unpriced_model"]
+    c = _measured_agent(_fake_client(fail=True))
+    run = asyncio.run(c.run({"t": "hi"}, c.default_config(), "v1", mode="eval"))
+    assert run.status == "error" and run.steps[0].error.startswith("RuntimeError")
+
+
+def test_gate_distrusts_self_reported_cost_and_latency():
+    base = _res(lambda i: 1.0 if i % 10 < 6 else 0.0)
+    good = _res(lambda i: 1.0 if i % 10 < 8 else 0.0)
+    for r in (base, good):
+        for e in r.examples:
+            e.telemetry = ["self_reported"] * r.samples
+    strict = compare(base, good, GateConfig(bootstrap=1000), 0.0025, 150)
+    assert strict["verdict"] == "not_eligible"
+    assert not strict["guardrails"]["cost"]["pass"] and not strict["telemetry"]["trusted"]
+    assert any("rc.clients" in reason for reason in strict["reasons"])
+    lenient = compare(base, good, GateConfig(bootstrap=1000, allow_self_reported_telemetry=True), 0.0025, 150)
+    assert lenient["verdict"] == "eligible"
+    too_few = compare(base, good, GateConfig(bootstrap=500, allow_self_reported_telemetry=True), 0.0025, 150)
+    assert too_few["verdict"] == "insufficient_bootstrap"
+
+
+def test_strict_project_rejects_a_self_reporting_agent(tmp_path):
+    from conftest import make_project
+
+    learner = make_project(tmp_path, self_reported=False)  # the simulated model self-reports
+    out = learner.cycle()
+    assert set(out["candidates"].values()) == {"gate_rejected"}
+    learner.close()
+
+
+def test_store_migrates_databases_without_telemetry(tmp_path):
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE runs (id TEXT PRIMARY KEY, agent TEXT, agent_version TEXT, mode TEXT, example_id TEXT, "
+                "sample INTEGER, status TEXT, input_json TEXT, output_json TEXT, steps_json TEXT, cost_usd REAL, "
+                "latency_ms REAL, started_at REAL, context_json TEXT, error TEXT, redaction TEXT)")
+    old.close()
+    s = Store(path)
+    r = _run()
+    s.put_run(r)
+    assert s.get_run(r.id)["telemetry"] == "measured"

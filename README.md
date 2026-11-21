@@ -42,11 +42,13 @@ async def lookup_order(order_id): ...
 @rc.tool(capability="irreversible", mock=lambda amount: {"refunded": amount})
 async def refund(amount): ...                              # in eval mode the mock runs, never the real call
 
+client = rc.clients.AsyncAnthropic()                     # Recursa measures tokens, cost and latency itself
+
 async def my_agent(task: dict, ctx: rc.Context):
-    async with rc.trace.model("claude-opus-5-5", input=task) as call:
-        ...                                                # call your model with ctx.system_prompt
-        call.set_usage(input_tokens, output_tokens, cost_usd)
-    return {"category": ..., "priority": ...}
+    resp = await client.messages.create(model="claude-opus-5-5", max_tokens=1024,
+                                        system=ctx.system_prompt,
+                                        messages=[{"role": "user", "content": task["ticket"]}])
+    return parse(resp)
 
 def build() -> rc.Project:                                 # referenced from recursa.yaml as factory: module:build
     agent = rc.wrap(my_agent, name="support-bot", surfaces={"system_prompt": PROMPT},
@@ -55,6 +57,8 @@ def build() -> rc.Project:                                 # referenced from rec
                          safety=[rc.evals.NoPIIEcho()])
     return rc.Project(agent=agent, suite=suite)
 ```
+
+**Telemetry is measured, not reported.** Model calls made through `rc.clients` are recorded by Recursa from the API response and its own clock. The cost and latency guardrails trust only those. If an agent reports its own usage through `rc.trace.model(...)` (for example, a simulator or a provider without a wrapper), its runs are marked `self_reported` and the gate fails the cost and latency guardrails. The exception is a project that sets `gate.allow_self_reported_telemetry: true`, as the simulated reference agent does; the review packet says so either way. Because the agent shares Recursa's process, this catches mistakes, not deliberately hostile agent code.
 
 Labelled data is JSONL: `{"id", "input": {...}, "expected": {...}, "group", "tags"}`. `group` clusters correlated examples (same customer, template or source) for the bootstrap.
 

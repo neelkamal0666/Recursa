@@ -113,8 +113,13 @@ class Agent:
             status=status, steps=steps, cost_usd=sum(s.cost_usd for s in steps),
             latency_ms=_run_latency(steps, wall_ms), started_at=started,
             context_snapshot={"surfaces": ctx.surfaces, "model": ctx.model}, error=error,
-            example_id=example_id, sample=sample,
+            example_id=example_id, sample=sample, telemetry=_telemetry(steps),
         )
+
+
+def _telemetry(steps: list[Step]) -> str:
+    """A run's cost and latency are trustworthy only if Recursa measured every model call."""
+    return "measured" if all(s.measured for s in steps if s.kind == "model") else "self_reported"
 
 
 def _seed(example_id: str | None, sample: int) -> int:

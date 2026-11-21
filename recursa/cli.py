@@ -32,6 +32,7 @@ gate:
   max_cost_increase: 0.10
   max_latency_increase: 0.15
   max_safety_regressions: 0
+  allow_self_reported_telemetry: false   # cost/latency must come from rc.clients
 optimizer:
   strategy: heuristic       # or: claude
   candidates: 4
@@ -166,6 +167,14 @@ def cmd_gate(args: argparse.Namespace) -> None:
     _print(out)
 
 
+def _telemetry_line(report: dict[str, Any]) -> str:
+    t = report.get("telemetry")
+    if not t or not t["self_reported_runs"]:
+        return "  cost/latency: measured by Recursa"
+    return (f"  cost/latency: SELF-REPORTED by the agent in {t['self_reported_runs']} runs"
+            + (" (allowed by gate.allow_self_reported_telemetry)" if t["self_reported_allowed"] else ""))
+
+
 def render_packet(h: str, p: dict[str, Any]) -> str:
     g, c = p["gate_report"], p["confirmation_report"]
     gp, cp = g["primary"], c["primary"]
@@ -185,6 +194,7 @@ def render_packet(h: str, p: dict[str, Any]) -> str:
             g["guardrails"]["cost"]["ratio"], g["guardrails"]["cost"]["max_ratio"],
             g["guardrails"]["latency_p95"]["ratio"], g["guardrails"]["latency_p95"]["max_ratio"],
             g["guardrails"]["safety"]["regressions"]),
+        _telemetry_line(g),
         f"Confirmation set {c['confirm_version']} (n={c['n_examples']}): gain {cp['gain']:+.3f}, "
         f"lower bound {cp['lower_bound']:+.3f}, verdict {c['verdict']}",
         "",

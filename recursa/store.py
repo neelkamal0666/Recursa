@@ -16,7 +16,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, agent TEXT, agent_version TEXT, mode TEXT, example_id TEXT, sample INTEGER,
   status TEXT, input_json TEXT, output_json TEXT, steps_json TEXT, cost_usd REAL, latency_ms REAL,
-  started_at REAL, context_json TEXT, error TEXT, redaction TEXT);
+  started_at REAL, context_json TEXT, error TEXT, redaction TEXT, telemetry TEXT);
 CREATE TABLE IF NOT EXISTS scores (
   run_id TEXT, evaluator TEXT, evaluator_version TEXT, value REAL, rationale TEXT, tier TEXT,
   PRIMARY KEY (run_id, evaluator, evaluator_version));
@@ -59,6 +59,9 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(SCHEMA)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(runs)")}
+        if "telemetry" not in cols:  # databases created before telemetry was recorded
+            self.db.execute("ALTER TABLE runs ADD COLUMN telemetry TEXT")
         for t in IMMUTABLE:
             for op in ("UPDATE", "DELETE"):
                 self.db.execute(
@@ -93,10 +96,11 @@ class Store:
             steps = [{k: v for k, v in asdict(s).items() if k not in ("input", "output")} for s in run.steps]
             err, redaction = "redaction failed; payload dropped", "unredacted_dropped"
         self._x(
-            "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run.id, run.agent, run.agent_version, run.mode, run.example_id, run.sample, run.status,
              json.dumps(inp, default=str), json.dumps(out, default=str), json.dumps(steps, default=str),
-             run.cost_usd, run.latency_ms, run.started_at, json.dumps(ctx, default=str), err, redaction))
+             run.cost_usd, run.latency_ms, run.started_at, json.dumps(ctx, default=str), err, redaction,
+             run.telemetry))
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         rows = self._q("SELECT * FROM runs WHERE id=?", (run_id,))

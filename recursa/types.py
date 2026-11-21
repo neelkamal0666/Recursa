@@ -73,6 +73,8 @@ class Step:
     error: str | None = None
     capability: str | None = None  # tools only
     provider_metadata: dict[str, Any] = field(default_factory=dict)
+    # True when Recursa measured usage/latency itself (rc.clients); False when the agent reported it.
+    measured: bool = False
 
 
 @dataclass
@@ -101,6 +103,7 @@ class Run:
     example_id: str | None = None
     sample: int = 0
     redaction: str = "applied"  # applied | unredacted_dropped
+    telemetry: str = "measured"  # measured | self_reported (any model step whose usage the agent reported)
 
 
 @dataclass

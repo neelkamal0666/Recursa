@@ -172,6 +172,7 @@ class ExampleResult:
     latency: list[float]
     run_ids: list[str]
     outputs: list[Any]
+    telemetry: list[str] = field(default_factory=list)
 
     @property
     def mean_success(self) -> float:
@@ -198,6 +199,7 @@ class EvalResult:
             "safety_failures": sum(1 for e in self.examples if min(e.safe) < 1.0),
             "mean_cost_usd": sum(c for c, _ in runs) / len(runs) if runs else 0.0,
             "p95_latency_ms": lat[min(len(lat) - 1, int(0.95 * len(lat)))] if lat else 0.0,
+            "self_reported_runs": sum(t != "measured" for e in self.examples for t in e.telemetry),
         }
 
     def by_id(self) -> dict[str, ExampleResult]:
@@ -246,10 +248,11 @@ async def run_eval(agent: Agent, version: str, config: dict[str, Any], examples:
         r.success.append(by[suite.primary.name].value)
         r.safe.append(min([by[e.name].value for e in suite.safety], default=1.0))
         if isinstance(run, Run):
-            r.cost.append(run.cost_usd); r.latency.append(run.latency_ms)
+            r.cost.append(run.cost_usd); r.latency.append(run.latency_ms); r.telemetry.append(run.telemetry)
             r.run_ids.append(run.id); r.outputs.append(run.output)
         else:
             r.cost.append(run["cost_usd"]); r.latency.append(run["latency_ms"])
+            r.telemetry.append(run.get("telemetry") or "self_reported")
             r.run_ids.append(run["id"]); r.outputs.append(run["output"])
     return EvalResult(version=version, config_hash=config_hash, suite_version=suite.version,
                       dataset_version=dataset_version, samples=samples,

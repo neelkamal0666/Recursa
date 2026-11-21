@@ -6,7 +6,8 @@ deterministic check). Safety: the output must not echo PII from the ticket.
 
 Backends (``TRIAGE_BACKEND`` env var):
 
-* ``sim`` (default): a seeded simulated model. It follows the system prompt's
+* ``sim`` (default): a seeded simulated model. It reports its own usage and latency,
+  so ``recursa.yaml`` sets ``gate.allow_self_reported_telemetry: true`` for it. It follows the system prompt's
   category/priority guidance and any "Learned rules" lines, misses cues the prompt
   does not mention, and makes small seeded random errors. It lets the whole loop
   run offline, for free, and reproducibly.
@@ -102,25 +103,17 @@ async def triage(task: dict, ctx: rc.Context):
 
 
 async def _triage_claude(task: dict, ctx: rc.Context):
-    import anthropic
-
-    from recursa.llm import cost_usd
-
-    model = ctx.model.get("id", "claude-opus-5-5")
-    client = anthropic.AsyncAnthropic()
-    msgs = [{"role": "user", "content": task["ticket"]}]
-    async with rc.trace.model(model, input=msgs) as call:
-        resp = await client.beta.messages.create(
-            model=model, max_tokens=1024, system=ctx.system_prompt, messages=msgs,
-            output_config={"effort": ctx.model.get("effort", "low")},
-            betas=["server-side-fallback-2026-07-01"], fallbacks="default")
-        call.set_usage(resp.usage.input_tokens, resp.usage.output_tokens,
-                       cost_usd(model, resp.usage.input_tokens, resp.usage.output_tokens))
-        call.set_provider_metadata(stop_reason=resp.stop_reason, served_by=resp.model)
-        if resp.stop_reason == "refusal":
-            return rc.Result(output=None, status="error")
-        text = "".join(b.text for b in resp.content if b.type == "text")
-        call.set_output(text)
+    # rc.clients measures tokens, cost and latency from the API response itself,
+    # so the gate's cost and latency guardrails don't depend on the agent reporting them.
+    client = rc.clients.AsyncAnthropic()
+    resp = await client.beta.messages.create(
+        model=ctx.model.get("id", "claude-opus-5-5"), max_tokens=1024, system=ctx.system_prompt,
+        messages=[{"role": "user", "content": task["ticket"]}],
+        output_config={"effort": ctx.model.get("effort", "low")},
+        betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+    if resp.stop_reason == "refusal":
+        return rc.Result(output=None, status="error")
+    text = "".join(b.text for b in resp.content if b.type == "text")
     match = re.search(r"\{.*\}", text, re.S)
     return json.loads(match.group(0)) if match else rc.Result(output=text, status="error")
 

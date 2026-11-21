@@ -16,7 +16,6 @@ import asyncio
 import difflib
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -298,18 +297,11 @@ class Learner:
         return result
 
     def _ingest_worker_runs(self, worker_db: str) -> float:
-        src = sqlite3.connect(worker_db)
-        src.row_factory = sqlite3.Row
-        cost = 0.0
+        from .store import Store
+
+        src = Store(worker_db)
         try:
-            for r in src.execute("SELECT * FROM runs"):
-                if not self.store._q("SELECT 1 FROM runs WHERE id=?", (r["id"],)):
-                    self.store._x(f"INSERT INTO runs VALUES ({','.join('?' * len(r.keys()))})", tuple(r))
-                    cost += r["cost_usd"] or 0.0
-            for r in src.execute("SELECT * FROM scores"):
-                self.store._x("INSERT OR IGNORE INTO scores VALUES (?,?,?,?,?,?)", tuple(r))
-            for r in src.execute("SELECT * FROM eval_cache"):
-                self.store.cache_put(r["key"], r["run_id"])
+            cost = self.store.import_records(src.export_records())
         finally:
             src.close()
         os.remove(worker_db)

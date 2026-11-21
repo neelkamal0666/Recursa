@@ -299,8 +299,6 @@ def cmd_audit(args: argparse.Namespace) -> None:
 
 
 def cmd_db(args: argparse.Namespace) -> None:
-    import sqlite3
-
     from . import migrations
 
     paths = Paths(load_config(args.config).home_path)
@@ -308,14 +306,8 @@ def cmd_db(args: argparse.Namespace) -> None:
     for label, path in (("records", paths.db), ("sealed", paths.sealed_db)):
         if not os.path.exists(path):
             out[label] = {"path": path, "exists": False}
-            continue
-        db = sqlite3.connect(path, isolation_level=None)
-        try:
-            if args.db_cmd == "migrate":
-                out[label] = {"path": path, "applied": migrations.migrate(db, "sqlite")}
-            out[label] = {"path": path, **out.get(label, {}), **migrations.status(db, "sqlite")}
-        finally:
-            db.close()
+        else:
+            out[label] = {"path": path, **migrations.for_path(path, apply=args.db_cmd == "migrate")}
     _print(out)
     if args.db_cmd == "status" and any(v.get("pending") or v.get("unknown") or v.get("modified")
                                        for v in out.values()):

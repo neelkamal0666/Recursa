@@ -14,7 +14,7 @@ from .types import Example, Result
 
 __all__ = ["Agent", "Config", "Context", "EvalSuite", "Example", "GateConfig", "Project", "Result",
            "SandboxViolation", "clients", "evals", "load_config", "tool", "trace", "wrap", "Learner"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def __getattr__(name: str):

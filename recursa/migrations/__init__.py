@@ -141,3 +141,16 @@ def migrate(db: sqlite3.Connection, backend: str = "sqlite", apply: bool = True)
         db.execute("ROLLBACK")
         raise
     return [f"{m.version:04d}_{m.name}" for m in pending]
+
+
+def for_path(path: str, apply: bool, backend: str = "sqlite") -> dict:
+    """Status of the database at ``path`` (applying pending migrations first if ``apply``)."""
+    db = sqlite3.connect(path, isolation_level=None)
+    try:
+        applied = migrate(db, backend) if apply else None
+        out = status(db, backend)
+        if applied is not None:
+            out["applied"] = applied
+        return out
+    finally:
+        db.close()

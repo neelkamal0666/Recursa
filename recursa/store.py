@@ -76,6 +76,32 @@ class Store:
         args = (mode, limit) if mode else (limit,)
         return [self.get_run(r["id"]) for r in self._q(sql, args)]
 
+    # -- bulk transfer between stores (optimizer worker -> main store) -------------------------
+    TRANSFER_TABLES = ("runs", "scores", "eval_cache")
+
+    def export_records(self) -> dict[str, list[dict[str, Any]]]:
+        """Rows exactly as stored (already redacted), for import_records on another store."""
+        return {t: [dict(r) for r in self._q(f"SELECT * FROM {t}")] for t in self.TRANSFER_TABLES}
+
+    def import_records(self, records: dict[str, list[dict[str, Any]]]) -> float:
+        """Append another store's rows, skipping any already present. Returns the cost of
+        the runs that were new, so the caller can charge them to a budget."""
+        cost = 0.0
+        with self._lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                for t in self.TRANSFER_TABLES:
+                    cols = [r[1] for r in self.db.execute(f"PRAGMA table_info({t})")]
+                    sql = f"INSERT OR IGNORE INTO {t} ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})"
+                    for row in records.get(t, []):
+                        if self.db.execute(sql, tuple(row.get(c) for c in cols)).rowcount and t == "runs":
+                            cost += row.get("cost_usd") or 0.0
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return cost
+
     def put_scores(self, scores: list[Score]) -> None:
         for s in scores:
             self._x("INSERT OR IGNORE INTO scores VALUES (?,?,?,?,?,?)",

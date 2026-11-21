@@ -369,3 +369,31 @@ def test_cli_db_status_and_migrate(tmp_path, capsys):
     assert out["records"]["pending"] == [] and out["records"]["current"] == out["records"]["latest"]
     main(["--config", cfg, "db", "migrate"])
     assert json.loads(capsys.readouterr().out)["records"]["applied"] == []
+
+
+def test_store_transfer_is_idempotent_and_charges_only_new_runs(tmp_path):
+    src, dst = Store(str(tmp_path / "w.db")), Store(str(tmp_path / "m.db"))
+    a, b = _run(), _run()
+    src.put_run(a)
+    src.put_run(b)
+    dst.put_run(a)  # already present in the destination
+    recs = src.export_records()
+    assert dst.import_records(recs) == pytest.approx(b.cost_usd)
+    assert dst.import_records(recs) == 0.0
+    assert dst.get_run(b.id)["id"] == b.id
+
+
+def test_no_sql_outside_the_store():
+    """Phase 1 swaps the store for other backends; nothing else may depend on SQLite."""
+    import re
+    from pathlib import Path
+
+    pkg = Path(rc.__file__).parent
+    offenders = []
+    for path in pkg.rglob("*.py"):
+        rel = path.relative_to(pkg).as_posix()
+        if rel == "store.py" or rel.startswith("migrations/") or rel == "isolation.py":
+            continue
+        if re.search(r"import sqlite3|\._q\(|\._x\(|\.db\.execute", path.read_text()):
+            offenders.append(rel)
+    assert offenders == []
